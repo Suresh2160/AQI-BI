@@ -1,0 +1,10 @@
+streamlit
+pandas
+plotly
+scikit-learn
+fpdf
+numpy
+requests
+bcrypt
+openai
+google-auth
