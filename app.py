@@ -12,6 +12,14 @@ from google.oauth2 import id_token
 from google.auth.transport import requests as google_requests
 import smtplib
 from email.message import EmailMessage
+import io
+import schedule
+import time
+import threading
+import folium
+from streamlit.components.v1 import html as st_html
+from streamlit_mic_recorder import speech_to_text
+import extra_streamlit_components as stx
 
 # ---------------- PAGE CONFIG ----------------
 st.set_page_config(page_title="AQI Dashboard", page_icon="🌍", layout="wide")
@@ -32,8 +40,13 @@ if "chat_open" not in st.session_state:
 if "role" not in st.session_state:
     st.session_state.role = "user"
 
+# ---------------- COOKIE MANAGER ----------------
+cookie_manager = stx.CookieManager()
+cookie_theme = cookie_manager.get(cookie="theme")
+
 if "theme" not in st.session_state:
-    st.session_state.theme = "Light"
+    # If cookie exists, use it; otherwise default to Dark
+    st.session_state.theme = cookie_theme if cookie_theme else "Dark"
 
 
 # ---------------- OPENAI CLIENT ----------------
@@ -65,11 +78,84 @@ def get_weather_data(city):
             "temp": current['temp_C'],
             "humidity": current['humidity'],
             "desc": current['weatherDesc'][0]['value'],
-            "wind": current['windspeedKmph']
+            "wind": current['windspeedKmph'],
+            "wind_dir": current['winddirDegree']
         }
     except:
         return None
 
+# ---------------- CITY COORDINATES ----------------
+CITY_COORDINATES = {
+    "Ahmedabad": [23.0225, 72.5714], "Aizawl": [23.7271, 92.7176], "Amaravati": [16.5417, 80.5158],
+    "Amritsar": [31.6340, 74.8723], "Bengaluru": [12.9716, 77.5946], "Bhopal": [23.2599, 77.4126],
+    "Brajrajnagar": [21.8333, 83.9167], "Chandigarh": [30.7333, 76.7794], "Chennai": [13.0827, 80.2707],
+    "Coimbatore": [11.0168, 76.9558], "Delhi": [28.6139, 77.2090], "Ernakulam": [9.9816, 76.2999],
+    "Gurugram": [28.4595, 77.0266], "Guwahati": [26.1445, 91.7362], "Hyderabad": [17.3850, 78.4867],
+    "Jaipur": [26.9124, 75.7873], "Jorapokhar": [23.7000, 86.4100], "Kochi": [9.9312, 76.2673],
+    "Kolkata": [22.5726, 88.3639], "Lucknow": [26.8467, 80.9462], "Mumbai": [19.0760, 72.8777],
+    "Patna": [25.5941, 85.1376], "Shillong": [25.5788, 91.8933], "Talcher": [20.9500, 85.2167],
+    "Thiruvananthapuram": [8.5241, 76.9366], "Visakhapatnam": [17.6868, 83.2185]
+}
+
+def add_coordinates(df):
+    df["Lat"] = df["City"].map({k: v[0] for k, v in CITY_COORDINATES.items()})
+    df["Lon"] = df["City"].map({k: v[1] for k, v in CITY_COORDINATES.items()})
+    return df
+
+# ---------------- NEWS API ----------------
+def fetch_aqi_news():
+    # Replace with your actual NewsAPI key or use st.secrets
+    # Get one for free at https://newsapi.org/
+    NEWS_API_KEY = "YOUR_NEWSAPI_KEY_HERE" 
+    
+    if NEWS_API_KEY == "YOUR_NEWSAPI_KEY_HERE":
+        return None 
+
+    url = f"https://newsapi.org/v2/everything?q=air+quality+pollution&language=en&sortBy=publishedAt&apiKey={NEWS_API_KEY}"
+    try:
+        response = requests.get(url, timeout=5)
+        return response.json().get("articles", [])
+    except:
+        return []
+
+# ---------------- SCHEDULER & EMAIL ----------------
+def send_daily_report_email():
+    # Fetch subscribed users (In a real app, fetch from DB where subscription=True)
+    # For demo, we send to the current logged in user if they opted in
+    if "daily_report_sub" in st.session_state and st.session_state.daily_report_sub:
+        user_email = st.session_state.user
+        if "@" in user_email: # Basic validation
+            subject = f"📢 Daily AQI Report - {pd.Timestamp.now().strftime('%Y-%m-%d')}"
+            body = "Here is your daily air quality update.\n\nPlease check the dashboard for more details."
+            
+            # Reusing the send logic (simplified)
+            # In production, use the send_reset_email logic with parameters
+            print(f"Simulating email to {user_email}: {subject}")
+            # send_reset_email(user_email) # Uncomment to actually send if SMTP is configured
+
+def run_scheduler():
+    while True:
+        schedule.run_pending()
+        time.sleep(60)
+
+# Start Scheduler in Background Thread (Singleton pattern for Streamlit)
+if "scheduler_active" not in st.session_state:
+    # Schedule the job
+    schedule.every().day.at("09:00").do(send_daily_report_email)
+    
+    # Start thread
+    t = threading.Thread(target=run_scheduler, daemon=True)
+    t.start()
+    st.session_state.scheduler_active = True
+
+# ---------------- MAP UTILS ----------------
+def get_wind_arrow_icon(angle, speed):
+    # Create a rotated arrow div
+    return folium.DivIcon(html=f"""
+        <div style="transform: rotate({angle}deg); font-size: 24px; color: {'#ff4b4b' if int(speed) > 20 else '#00c9ff'}; text-shadow: 0 0 5px black;">
+            ➤
+        </div>
+    """)
 
 # ---------------- USER DATABASE (Signup/Login) ----------------
 def init_user_db():
@@ -133,6 +219,12 @@ def init_user_db():
         cursor.execute("SELECT status FROM feedback LIMIT 1")
     except sqlite3.OperationalError:
         cursor.execute("ALTER TABLE feedback ADD COLUMN status TEXT DEFAULT 'Pending'")
+
+    # Migration: Add subscription column to users
+    try:
+        cursor.execute("SELECT subscription FROM users LIMIT 1")
+    except sqlite3.OperationalError:
+        cursor.execute("ALTER TABLE users ADD COLUMN subscription INTEGER DEFAULT 0")
 
     conn.commit()
     conn.close()
@@ -299,47 +391,89 @@ if st.session_state.logged_in == False:
             st.success(f"Login Successful with Google: {email} ✅")
             st.rerun()
 
-    # Check for Password Reset Request (passed from forgot_password.html)
-    if "reset_email" in st.query_params:
-        r_email = st.query_params["reset_email"]
-        if send_reset_email(r_email):
-            st.success(f"✅ Password reset link has been sent to: {r_email}")
-        else:
-            st.error("❌ Failed to send email. Please check server logs or SMTP configuration.")
+    # Check for Password Reset Token
+    if "reset_token" in st.query_params:
+        token = st.query_params["reset_token"]
+        try:
+            # Simple token parsing (In production, use signed tokens)
+            # Token format expected: "dummy_token_for_user@example.com"
+            reset_email_user = token.split("_for_")[1]
+            
+            st.markdown(f"<h3 style='text-align:center;'>🔐 Reset Password for {reset_email_user}</h3>", unsafe_allow_html=True)
+            
+            with st.form("reset_password_form"):
+                new_pw_reset = st.text_input("New Password", type="password")
+                confirm_pw_reset = st.text_input("Confirm Password", type="password")
+                submit_reset = st.form_submit_button("Update Password")
+                
+                if submit_reset:
+                    if new_pw_reset == confirm_pw_reset:
+                        conn = sqlite3.connect("aqi.db")
+                        cursor = conn.cursor()
+                        hashed_pw = bcrypt.hashpw(new_pw_reset.encode(), bcrypt.gensalt()).decode()
+                        cursor.execute("UPDATE users SET password=? WHERE username=?", (hashed_pw, reset_email_user))
+                        conn.commit()
+                        conn.close()
+                        st.success("✅ Password updated successfully! Please login.")
+                        st.query_params.clear()
+                    else:
+                        st.error("❌ Passwords do not match.")
+            st.stop()
+        except IndexError:
+            st.error("❌ Invalid Password Reset Token.")
 
-    st.markdown("<h1 style='text-align:center;'>🌍 AQI Dashboard System</h1>", unsafe_allow_html=True)
-    st.markdown("<h4 style='text-align:center;'>Signup / Login Portal</h4>", unsafe_allow_html=True)
+    col_spacer1, col_login, col_spacer2 = st.columns([1, 2, 1])
+    
+    with col_login:
+        st.markdown("""
+            <div class='login-container'>
+                <h1 style='text-align:center; font-size: 3rem; margin-bottom: 10px;'>🌍</h1>
+                <h1 style='text-align:center; background: linear-gradient(90deg, #4facfe, #00f2fe); -webkit-background-clip: text; -webkit-text-fill-color: transparent;'>AQI Dashboard</h1>
+                <p style='text-align:center; color: #ccc; margin-bottom: 30px;'>Monitor Air Quality with Real-Time Insights</p>
+            </div>
+        """, unsafe_allow_html=True)
 
-    tab1, tab2 = st.tabs(["🔑 Login", "📝 Signup"])
+        tab1, tab2 = st.tabs(["🔑 Login", "📝 Signup"])
 
-    with tab1:
-        st.subheader("Login Account")
-        username = st.text_input("Username", key="login_user")
-        password = st.text_input("Password", type="password", key="login_pass")
+        with tab1:
+            st.markdown("### Welcome Back!")
+            username = st.text_input("Username", key="login_user", placeholder="Enter your username")
+            password = st.text_input("Password", type="password", key="login_pass", placeholder="Enter your password")
 
-        if st.button("Login"):
-            success, role = login_user(username, password)
-            if success:
-                st.session_state.logged_in = True
-                st.session_state.user = username
-                st.session_state.role = role
-                log_user_activity(username, "Login via Password")
-                st.success("Login Successful ✅")
-                st.rerun()
-            else:
-                st.error("Invalid username or password ❌")
+            st.markdown("<br>", unsafe_allow_html=True)
+            if st.button("🚀 Login", use_container_width=True):
+                success, role = login_user(username, password)
+                if success:
+                    st.session_state.logged_in = True
+                    st.session_state.user = username
+                    st.session_state.role = role
+                    log_user_activity(username, "Login via Password")
+                    st.success("Login Successful ✅")
+                    st.rerun()
+                else:
+                    st.error("Invalid username or password ❌")
 
-    with tab2:
-        st.subheader("Create New Account")
-        new_username = st.text_input("New Username", key="signup_user")
-        new_password = st.text_input("New Password", type="password", key="signup_pass")
+            with st.expander("Forgot Password?"):
+                st.write("Enter your email to receive a reset link.")
+                reset_email_input = st.text_input("Email Address", key="reset_email_input")
+                if st.button("📩 Send Reset Link"):
+                    if send_reset_email(reset_email_input):
+                        st.success(f"✅ Reset link sent to {reset_email_input}")
+                    else:
+                        st.error("❌ Failed to send email.")
 
-        if st.button("Signup"):
-            if signup_user(new_username, new_password):
-                log_user_activity(new_username, "New User Signup")
-                st.success("Account Created Successfully ✅ Please Login Now")
-            else:
-                st.error("Username already exists ❌")
+        with tab2:
+            st.markdown("### Join Us Today")
+            new_username = st.text_input("New Username", key="signup_user", placeholder="Choose a username")
+            new_password = st.text_input("New Password", type="password", key="signup_pass", placeholder="Choose a strong password")
+
+            st.markdown("<br>", unsafe_allow_html=True)
+            if st.button("✨ Create Account", use_container_width=True):
+                if signup_user(new_username, new_password):
+                    log_user_activity(new_username, "New User Signup")
+                    st.success("Account Created Successfully ✅ Please Login Now")
+                else:
+                    st.error("Username already exists ❌")
 
     st.stop()
 
@@ -348,90 +482,141 @@ if st.session_state.logged_in == False:
 st.sidebar.title("🌍 AQI Dashboard Menu")
 
 # Theme Toggle
-st.sidebar.selectbox("🎨 Theme", ["Light", "Dark"], key="theme")
+def on_theme_change():
+    # Save the selected theme to a cookie that expires in 30 days
+    cookie_manager.set("theme", st.session_state.theme, expires_at=pd.Timestamp.now() + pd.Timedelta(days=30))
+
+st.sidebar.selectbox("🎨 Theme", ["Light", "Dark"], key="theme", on_change=on_theme_change)
 
 # Dark Mode CSS & Chart Template
 if st.session_state.theme == "Dark":
     st.markdown("""
     <style>
+    @import url('https://fonts.googleapis.com/css2?family=Poppins:wght@300;400;600;700&display=swap');
+
+    html, body, [class*="css"] {
+        font-family: 'Poppins', sans-serif;
+    }
+
     @keyframes gradientBG {
         0% { background-position: 0% 50%; }
         50% { background-position: 100% 50%; }
         100% { background-position: 0% 50%; }
     }
 
+    @keyframes fadeIn {
+        0% { opacity: 0; transform: translateY(-20px); }
+        100% { opacity: 1; transform: translateY(0); }
+    }
+
     /* Main container */
     [data-testid="stAppViewContainer"] {
-        background: linear-gradient(-45deg, #0f2027, #203a43, #2c5364);
-        background-size: 200% 200%;
-        animation: gradientBG 20s ease infinite;
+        background: linear-gradient(-45deg, #0f2027, #203a43, #2c5364, #243b55);
+        background-size: 400% 400%;
+        animation: gradientBG 15s ease infinite;
         color: #E0E0E0;
     }
 
     /* Sidebar */
     [data-testid="stSidebar"] {
-        background: rgba(38, 39, 48, 0.6);
-        backdrop-filter: blur(10px);
+        background: rgba(0, 0, 0, 0.2);
+        backdrop-filter: blur(20px);
         border-right: 1px solid rgba(255, 255, 255, 0.1);
     }
 
-    /* Make all text in sidebar and main area white for contrast */
-    .stMarkdown, p, h1, h2, h3, h4, h5, h6, label, .st-b, .st-at, .st-ar, .st-as   {
+    /* Text Colors */
+    .stMarkdown, p, h1, h2, h3, h4, h5, h6, label, span, div {
        color: #FFFFFF !important;
     }
-    
-    /* Headers */
-    h1, h2, h3 {
-        font-weight: 600;
-    }
 
-    /* Metric labels and values */
-    [data-testid="stMetricLabel"] {
-        color: #A0AEC0; /* Softer gray */
+    /* Custom Metric Cards */
+    .metric-container {
+        background: rgba(255, 255, 255, 0.1);
+        border-radius: 15px;
+        padding: 20px;
+        box-shadow: 0 4px 15px rgba(0, 0, 0, 0.2);
+        backdrop-filter: blur(5px);
+        text-align: center;
+        transition: transform 0.3s ease, box-shadow 0.3s ease;
+        border: 1px solid rgba(255, 255, 255, 0.1);
+        animation: fadeIn 1s ease-out;
     }
-    [data-testid="stMetricValue"] {
-        color: #FFFFFF;
+    .metric-container:hover {
+        transform: translateY(-5px);
+        box-shadow: 0 8px 25px rgba(0, 0, 0, 0.3);
+        background: rgba(255, 255, 255, 0.15);
+    }
+    .metric-value {
         font-size: 2.5rem;
+        font-weight: 700;
+        background: linear-gradient(90deg, #4facfe, #00f2fe);
+        -webkit-background-clip: text;
+        -webkit-text-fill-color: transparent;
     }
-    
-    /* Expander headers */
-    [data-testid="stExpander"] summary {
-        background-color: rgba(255, 255, 255, 0.05);
-        border-radius: 0.5rem;
-        color: #E0E0E0;
+    .metric-label {
+        font-size: 1rem;
+        color: #ddd !important;
+        margin-top: 5px;
+        font-weight: 500;
     }
-    
-    /* Charts - make background transparent to show gradient */
-    .stPlotlyChart {
-        background-color: transparent !important;
-    }
-    iframe {
-        background-color: transparent !important;
+    .metric-icon {
+        font-size: 2rem;
+        margin-bottom: 10px;
     }
 
     /* Buttons */
     .stButton>button {
-        border: 2px solid #4facfe;
-        background: transparent;
-        color: #4facfe !important; /* Important to override default */
+        background: linear-gradient(90deg, #00C9FF 0%, #92FE9D 100%);
+        color: #000 !important;
+        border: none;
         border-radius: 25px;
-        padding: 10px 20px;
+        padding: 12px 24px;
+        font-weight: 700;
+        text-transform: uppercase;
+        letter-spacing: 1px;
         transition: all 0.3s ease;
-        font-weight: 600;
+        box-shadow: 0 4px 15px rgba(0, 201, 255, 0.4);
     }
     .stButton>button:hover {
-        background-color: #4facfe;
-        color: white !important; /* Important to override default */
-        box-shadow: 0 0 15px #4facfe;
-        transform: translateY(-2px);
+        transform: scale(1.05);
+        box-shadow: 0 6px 20px rgba(0, 201, 255, 0.6);
+        color: #000 !important;
     }
-    .stButton>button:active {
-        transform: translateY(0);
+
+    /* Inputs */
+    .stTextInput > div > div > input {
+        background-color: rgba(255, 255, 255, 0.1);
+        color: white;
+        border: 1px solid rgba(255, 255, 255, 0.2);
+        border-radius: 10px;
     }
     
-    /* Selectbox dropdown */
-    [data-testid="stSelectbox"] {
-        border-radius: 0.5rem;
+    /* Tabs */
+    .stTabs [data-baseweb="tab-list"] {
+        gap: 10px;
+        background-color: transparent;
+    }
+    .stTabs [data-baseweb="tab"] {
+        background-color: rgba(255,255,255,0.1);
+        border-radius: 10px;
+        padding: 10px 20px;
+        color: white;
+        border: none;
+    }
+    .stTabs [aria-selected="true"] {
+        background: linear-gradient(90deg, #FC466B 0%, #3F5EFB 100%);
+        color: white;
+    }
+
+    /* Login Container */
+    .login-container {
+        background: rgba(255, 255, 255, 0.05);
+        padding: 40px;
+        border-radius: 20px;
+        backdrop-filter: blur(10px);
+        border: 1px solid rgba(255, 255, 255, 0.1);
+        box-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.37);
+        animation: fadeIn 1.5s ease-out;
     }
 
     </style>
@@ -440,7 +625,7 @@ if st.session_state.theme == "Dark":
 else:
     chart_template = "plotly"
 
-menu_options = ["Dashboard", "City Comparison", "Health Advice", "Prediction", "Report Download", "Raw Data", "Profile", "Feedback"]
+menu_options = ["Dashboard", "City Comparison", "Health Advice", "Prediction", "News Feed", "Report Download", "Raw Data", "Profile", "Feedback"]
 if st.session_state.role == "admin":
     menu_options.append("User Management")
 
@@ -511,8 +696,24 @@ if menu == "Dashboard":
     if not filtered_df.empty and filtered_df["AQI"].max() > alert_threshold:
         st.error(f"🚨 **CRITICAL ALERT**: The AQI in the selected region has reached **{filtered_df['AQI'].max()}**, which exceeds your safety threshold of {alert_threshold}. Please take necessary precautions.")
 
-    st.title("📊 Advanced Air Quality Dashboard")
+    st.markdown("""
+        <h1 style='text-align: left; background: linear-gradient(90deg, #00C9FF, #92FE9D); -webkit-background-clip: text; -webkit-text-fill-color: transparent; animation: fadeIn 1s;'>
+            📊 Advanced Air Quality Dashboard
+        </h1>
+    """, unsafe_allow_html=True)
     st.write("### 📌 Selected Cities:", ", ".join(selected_cities))
+
+    # Excel Export
+    buffer = io.BytesIO()
+    with pd.ExcelWriter(buffer, engine='xlsxwriter') as writer:
+        filtered_df.to_excel(writer, index=False, sheet_name='AQI Data')
+        
+    st.download_button(
+        label="📥 Download Filtered Data (Excel)",
+        data=buffer,
+        file_name="aqi_dashboard_data.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    )
 
     # Weather Widget
     if selected_cities:
@@ -521,10 +722,74 @@ if menu == "Dashboard":
             st.info(f"☁️ **Real-time Weather in {selected_cities[0]}:** {weather['desc']} | 🌡️ {weather['temp']}°C | 💧 {weather['humidity']}% Humidity | 💨 {weather['wind']} km/h Wind")
 
     col1, col2, col3, col4 = st.columns(4)
-    col1.metric("Total Records", len(filtered_df))
-    col2.metric("Average AQI", round(filtered_df["AQI"].mean(), 2))
-    col3.metric("Max AQI", round(filtered_df["AQI"].max(), 2))
-    col4.metric("Average PM2.5", round(filtered_df["PM25"].mean(), 2))
+    
+    def display_metric(col, label, value, icon):
+        with col:
+            st.markdown(f"""
+            <div class="metric-container">
+                <div class="metric-icon">{icon}</div>
+                <div class="metric-value">{value}</div>
+                <div class="metric-label">{label}</div>
+            </div>
+            """, unsafe_allow_html=True)
+
+    display_metric(col1, "Total Records", len(filtered_df), "📂")
+    display_metric(col2, "Average AQI", round(filtered_df["AQI"].mean(), 2), "🌫")
+    display_metric(col3, "Max AQI", round(filtered_df["AQI"].max(), 2), "🔥")
+    display_metric(col4, "Average PM2.5", round(filtered_df["PM25"].mean(), 2), "🏭")
+
+    st.write("---")
+    st.subheader("🗺️ Geospatial AQI Evolution (Animated Map)")
+    
+    # Prepare data for animation
+    map_df = filtered_df.copy()
+    map_df = add_coordinates(map_df)
+    map_df = map_df.dropna(subset=["Lat", "Lon"])
+    
+    if not map_df.empty:
+        map_df["Date_Str"] = map_df["Date"].dt.strftime('%Y-%m-%d')
+        map_df = map_df.sort_values("Date")
+        
+        fig_anim_map = px.scatter_mapbox(
+            map_df, lat="Lat", lon="Lon", size="AQI", color="AQI",
+            animation_frame="Date_Str", hover_name="City",
+            color_continuous_scale="RdYlGn_r", size_max=40, zoom=3.5,
+            mapbox_style="carto-positron", title="AQI Changes Over Time"
+        )
+        st.plotly_chart(fig_anim_map, use_container_width=True)
+    else:
+        st.warning("Not enough location data available for the map.")
+
+    st.write("---")
+    st.subheader("🌬️ Real-Time Wind Analysis (Speed & Direction)")
+    
+    if selected_cities:
+        # Create base map centered on the first selected city
+        first_city_coords = CITY_COORDINATES.get(selected_cities[0], [20.5937, 78.9629])
+        wind_map = folium.Map(location=first_city_coords, zoom_start=5, tiles="CartoDB dark_matter")
+        
+        for city in selected_cities:
+            coords = CITY_COORDINATES.get(city)
+            if coords:
+                w_data = get_weather_data(city)
+                if w_data:
+                    # Add Wind Marker (Arrow)
+                    folium.Marker(
+                        location=coords,
+                        icon=get_wind_arrow_icon(w_data['wind_dir'], w_data['wind']),
+                        tooltip=f"<b>{city}</b><br>Wind: {w_data['wind']} km/h<br>Dir: {w_data['wind_dir']}°"
+                    ).add_to(wind_map)
+                    
+                    # Add Circle for context
+                    folium.CircleMarker(
+                        location=coords,
+                        radius=10,
+                        color="#333",
+                        fill=True,
+                        fill_opacity=0.4
+                    ).add_to(wind_map)
+        
+        st_html(wind_map._repr_html_(), height=500)
 
     st.write("---")
 
@@ -771,22 +1036,9 @@ elif menu == "City Comparison":
         st.write("---")
         st.subheader("🗺️ Geographical Comparison")
         
-        # Coordinates for major Indian cities (expand as needed)
-        city_coordinates = {
-            "Ahmedabad": [23.0225, 72.5714], "Aizawl": [23.7271, 92.7176], "Amaravati": [16.5417, 80.5158],
-            "Amritsar": [31.6340, 74.8723], "Bengaluru": [12.9716, 77.5946], "Bhopal": [23.2599, 77.4126],
-            "Brajrajnagar": [21.8333, 83.9167], "Chandigarh": [30.7333, 76.7794], "Chennai": [13.0827, 80.2707],
-            "Coimbatore": [11.0168, 76.9558], "Delhi": [28.6139, 77.2090], "Ernakulam": [9.9816, 76.2999],
-            "Gurugram": [28.4595, 77.0266], "Guwahati": [26.1445, 91.7362], "Hyderabad": [17.3850, 78.4867],
-            "Jaipur": [26.9124, 75.7873], "Jorapokhar": [23.7000, 86.4100], "Kochi": [9.9312, 76.2673],
-            "Kolkata": [22.5726, 88.3639], "Lucknow": [26.8467, 80.9462], "Mumbai": [19.0760, 72.8777],
-            "Patna": [25.5941, 85.1376], "Shillong": [25.5788, 91.8933], "Talcher": [20.9500, 85.2167],
-            "Thiruvananthapuram": [8.5241, 76.9366], "Visakhapatnam": [17.6868, 83.2185]
-        }
-
         map_data = []
         for idx, row in avg_data.iterrows():
-            coords = city_coordinates.get(row["City"], [None, None])
+            coords = CITY_COORDINATES.get(row["City"], [None, None])
             if coords[0] is not None:
                 map_data.append({"City": row["City"], "Lat": coords[0], "Lon": coords[1], "AQI": row["AQI"]})
         
@@ -799,6 +1051,35 @@ elif menu == "City Comparison":
             st.plotly_chart(fig_map, use_container_width=True)
         else:
             st.warning("Coordinates not available for selected cities to display map.")
+
+        # ---------------- GLOBAL AVERAGE COMPARISON ----------------
+        st.write("---")
+        st.subheader("🌍 City vs Global Average")
+        
+        # Calculate Global Average (Mean of all AQI records in DB)
+        global_aqi_avg = df["AQI"].mean()
+        
+        # Select City for Comparison
+        comp_city_single = st.selectbox("Select City to Compare with Global Average", city_list, key="global_comp_city")
+        
+        if comp_city_single:
+            city_aqi_avg = df[df["City"] == comp_city_single]["AQI"].mean()
+            
+            col_g1, col_g2, col_g3 = st.columns(3)
+            col_g1.metric(f"{comp_city_single} Average", round(city_aqi_avg, 2))
+            col_g2.metric("Global Average", round(global_aqi_avg, 2))
+            col_g3.metric("Difference", round(city_aqi_avg - global_aqi_avg, 2), delta=round(city_aqi_avg - global_aqi_avg, 2), delta_color="inverse")
+            
+            # Visualization
+            comp_data_global = pd.DataFrame({
+                "Region": [comp_city_single, "Global Average"],
+                "AQI": [city_aqi_avg, global_aqi_avg]
+            })
+            
+            fig_global = px.bar(comp_data_global, x="Region", y="AQI", color="Region", 
+                                title=f"AQI Comparison: {comp_city_single} vs Global Average",
+                                text_auto=True, template=chart_template)
+            st.plotly_chart(fig_global, use_container_width=True)
 
 # ---------------- HEALTH ADVICE PAGE ----------------
 elif menu == "Health Advice":
@@ -876,6 +1157,35 @@ elif menu == "Prediction":
         st.success(f"✅ Predicted AQI = {pred_val}")
         st.info(f"📌 AQI Category: {aqi_category(pred_val)}")
 
+# ---------------- NEWS FEED PAGE ----------------
+elif menu == "News Feed":
+    st.title("📰 Global Air Quality News")
+    st.write("Latest updates on air pollution, environmental policies, and health advisories.")
+    
+    news_items = fetch_aqi_news()
+    
+    if news_items is None:
+        st.warning("⚠️ News API Key is missing. Please add your API key in the code to fetch real-time news.")
+        st.markdown("[Get a free API Key from NewsAPI.org](https://newsapi.org/)")
+    elif not news_items:
+        st.info("No news articles found at the moment.")
+    else:
+        for article in news_items[:10]: # Show top 10
+            with st.container():
+                col_img, col_text = st.columns([1, 3])
+                
+                with col_img:
+                    if article.get("urlToImage"):
+                        st.image(article["urlToImage"], use_container_width=True)
+                    else:
+                        st.markdown("📷 *No Image*")
+                
+                with col_text:
+                    st.subheader(f"[{article['title']}]({article['url']})")
+                    st.caption(f"Source: {article['source']['name']} | Published: {article['publishedAt'][:10]}")
+                    st.write(article['description'])
+                
+                st.write("---")
 
 # ---------------- REPORT DOWNLOAD PAGE ----------------
 elif menu == "Report Download":
@@ -960,6 +1270,27 @@ elif menu == "Profile":
             log_user_activity(st.session_state.user, "Updated Profile Picture")
             st.success("Profile picture updated successfully!")
             st.rerun()
+
+    st.write("---")
+    st.subheader("📧 Notification Settings")
+    
+    # Fetch current subscription status
+    conn = sqlite3.connect("aqi.db")
+    c = conn.cursor()
+    c.execute("SELECT subscription FROM users WHERE username=?", (st.session_state.user,))
+    sub_status = c.fetchone()
+    is_subscribed = bool(sub_status[0]) if sub_status else False
+    conn.close()
+    
+    new_sub = st.checkbox("Subscribe to Daily AQI Email Reports (09:00 AM)", value=is_subscribed)
+    if new_sub != is_subscribed:
+        conn = sqlite3.connect("aqi.db")
+        c = conn.cursor()
+        c.execute("UPDATE users SET subscription=? WHERE username=?", (1 if new_sub else 0, st.session_state.user))
+        conn.commit()
+        conn.close()
+        st.session_state.daily_report_sub = new_sub
+        st.success("Subscription settings updated!")
 
     st.write("---")
     st.subheader("🔐 Change Password")
@@ -1265,18 +1596,27 @@ if st.session_state.chat_open:
         st.rerun()
 
     # Input
-    user_msg = st.text_input("Type your message", key="chat_input_msg")
+    col_chat_in, col_chat_mic = st.columns([5, 1])
+    
+    with col_chat_in:
+        user_msg = st.text_input("Type your message", key="chat_input_msg", label_visibility="collapsed", placeholder="Type or speak...")
+    
+    with col_chat_mic:
+        # Voice Input Button
+        voice_text = speech_to_text(language='en', start_prompt="🎤", stop_prompt="🛑", just_once=True, key='STT')
 
-    if st.button("Send", key="send_btn"):
+    # Handle Input (Text Button or Voice)
+    send_clicked = st.button("Send", key="send_btn", use_container_width=True)
+    final_msg = voice_text if voice_text else (user_msg if send_clicked and user_msg.strip() else None)
 
-        if user_msg.strip():
-            st.session_state.chat_history.append({"role": "user", "content": user_msg})
+    if final_msg:
+        st.session_state.chat_history.append({"role": "user", "content": final_msg})
 
-            # Suggested city data
-            city_data = df[df["City"] == suggested_city] if suggested_city else df
-            avg_aqi = city_data["AQI"].mean()
+        # Suggested city data
+        city_data = df[df["City"] == suggested_city] if suggested_city else df
+        avg_aqi = city_data["AQI"].mean()
 
-            prompt = f"""
+        prompt = f"""
 You are an Air Quality AI Assistant.
 
 User location: {location_text}
@@ -1292,67 +1632,20 @@ Give:
 4. Warning if AQI is severe
 """
 
-            try:
-                response = client.chat.completions.create(
-                    model="gpt-4o-mini",
-                    messages=[{"role": "user", "content": prompt}],
-                    temperature=0.6
-                )
+        try:
+            response = client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.6
+            )
 
-                ai_reply = response.choices[0].message.content
+            ai_reply = response.choices[0].message.content
 
-            except Exception as e:
-                ai_reply = f"⚠️ OpenAI Error: {e}"
+        except Exception as e:
+            ai_reply = f"⚠️ OpenAI Error: {e}"
 
-            st.session_state.chat_history.append({"role": "assistant", "content": ai_reply})
-            st.rerun()
-
-    if st.button("❌ Close Chat", key="close_chat"):
-        st.session_state.chat_open = False
+        st.session_state.chat_history.append({"role": "assistant", "content": ai_reply})
         st.rerun()
-
-    st.markdown("</div>", unsafe_allow_html=True)
-    user_msg = st.text_input("Type your message", key="chat_input_msg")
-
-    if st.button("Send", key="send_btn"):
-
-        if user_msg.strip():
-            st.session_state.chat_history.append({"role": "user", "content": user_msg})
-
-            # Suggested city data
-            city_data = df[df["City"] == suggested_city] if suggested_city else df
-            avg_aqi = city_data["AQI"].mean()
-
-            prompt = f"""
-You are an Air Quality AI Assistant.
-
-User location: {location_text}
-Nearest City found in database: {suggested_city if suggested_city else "Not Found"}
-Average AQI for that city: {avg_aqi}
-
-User question: {user_msg}
-
-Give:
-1. Simple answer
-2. Health advice
-3. Suggestions like mask / indoor / outdoor
-4. Warning if AQI is severe
-"""
-
-            try:
-                response = client.chat.completions.create(
-                    model="gpt-4o-mini",
-                    messages=[{"role": "user", "content": prompt}],
-                    temperature=0.6
-                )
-
-                ai_reply = response.choices[0].message.content
-
-            except Exception as e:
-                ai_reply = f"⚠️ OpenAI Error: {e}"
-
-            st.session_state.chat_history.append({"role": "assistant", "content": ai_reply})
-            st.rerun()
 
     if st.button("❌ Close Chat", key="close_chat"):
         st.session_state.chat_open = False
