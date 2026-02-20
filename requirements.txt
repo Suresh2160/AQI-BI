@@ -7,3 +7,4 @@ fpdf
 requests
 bcrypt
 openai
+google-auth
