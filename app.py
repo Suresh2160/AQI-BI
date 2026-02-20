@@ -356,11 +356,12 @@ df["AQI_Category"] = df["AQI"].apply(aqi_category)
 
 
 # ---------------- AUTH UI ----------------
-if st.session_state.logged_in == False:
+if not st.session_state.logged_in:
+    qp = st.query_params
 
-    # Check for Google Login Token in URL (passed from login.html)
-    if "token" in st.query_params:
-        token = st.query_params["token"]
+    # Priority 1: Handle form submissions and API-like actions
+    if "token" in qp:  # Google Login
+        token = qp.get("token")
         email, role = login_google_user(token)
         if email:
             st.session_state.logged_in = True
@@ -368,34 +369,32 @@ if st.session_state.logged_in == False:
             st.session_state.role = role
             log_user_activity(email, "Login via Google")
             st.success(f"Login Successful with Google: {email} ✅")
+            st.query_params.clear()
             st.rerun()
 
-    # Check for Password Reset Request (passed from forgot_password.html)
-    if "reset_email" in st.query_params:
-        r_email = st.query_params["reset_email"]
+    elif "reset_email" in qp:  # Password Reset Request
+        r_email = qp.get("reset_email")
         if send_reset_email(r_email):
             st.success(f"✅ Password reset link has been sent to: {r_email}")
         else:
             st.error("❌ Failed to send email. Please check server logs or SMTP configuration.")
+        st.stop()
 
-    # Check for HTML Form Login/Signup (via URL parameters)
-    if "username" in st.query_params and "password" in st.query_params:
-        qp = st.query_params
-        username = qp["username"]
-        password = qp["password"]
+    elif "username" in qp and "password" in qp:  # Standard Login/Signup
+        username = qp.get("username")
+        password = qp.get("password")
 
-        # If 'email' is present, treat as Registration (from reg.html)
-        if "email" in qp:
+        if "email" in qp:  # Signup action
             if signup_user(username, password):
                 log_user_activity(username, "New User Signup via HTML")
                 st.success("Account Created! Redirecting to login page...")
-                st.markdown('<meta http-equiv="refresh" content="3;url=login.html" />', unsafe_allow_html=True)
+                st.markdown('<meta http-equiv="refresh" content="2;url=/?action=login" />', unsafe_allow_html=True)
                 st.stop()
             else:
-                st.error("Username already exists. Please try a different one.")
-        
-        # Otherwise, treat as Login (from login.html)
-        else:
+                st.error("Username already exists. Redirecting to registration page...")
+                st.markdown('<meta http-equiv="refresh" content="3;url=/" />', unsafe_allow_html=True)
+                st.stop()
+        else:  # Login action
             success, role = login_user(username, password)
             if success:
                 st.session_state.logged_in = True
@@ -403,20 +402,30 @@ if st.session_state.logged_in == False:
                 st.session_state.role = role
                 log_user_activity(username, "Login via Password")
                 st.success("Login Successful ✅")
-                st.query_params.clear() # Clean URL
+                st.query_params.clear()
                 st.rerun()
             else:
-                st.error("Invalid username or password ❌")
+                st.error("Invalid username or password. Please try again.")
+                st.markdown('<meta http-equiv="refresh" content="2;url=/?action=login" />', unsafe_allow_html=True)
+                st.stop()
 
-    # If still not logged in, show access denied
-    if not st.session_state.logged_in:
-        st.markdown("<h1 style='text-align:center;'>🌍 AQI Dashboard System</h1>", unsafe_allow_html=True)
-        st.warning("Please log in using the external Login Page.")
-        st.markdown(f"""
-            <div style="text-align: center;">
-                <p>Open <b>login.html</b> or <b>reg.html</b> in your browser to authenticate.</p>
-            </div>
-        """, unsafe_allow_html=True)
+    # Priority 2: Display the correct HTML page if no action was taken
+    else:
+        action = qp.get("action")
+        if action == "login":
+            try:
+                with open("login.html", "r", encoding="utf-8") as f:
+                    login_html = f.read()
+                st.markdown(login_html, unsafe_allow_html=True)
+            except FileNotFoundError:
+                st.error("login.html not found.")
+        else:
+            try:
+                with open("reg.html", "r", encoding="utf-8") as f:
+                    reg_html = f.read()
+                st.markdown(reg_html, unsafe_allow_html=True)
+            except FileNotFoundError:
+                st.error("reg.html not found.")
         st.stop()
 
 
