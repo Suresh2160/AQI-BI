@@ -20,7 +20,7 @@ import time
 import threading
 
 # ---------------- PAGE CONFIG ----------------
-st.set_page_config(page_title="AQI Dashboard", page_icon="🌍", layout="wide")
+st.set_page_config(page_title="AQIs Dashboard", page_icon="🌍", layout="wide")
 
 # ---------------- SESSION INIT ----------------
 if "logged_in" not in st.session_state:
@@ -387,13 +387,10 @@ if st.session_state.logged_in == False:
         # If 'email' is present, treat as Registration (from reg.html)
         if "email" in qp:
             if signup_user(username, password):
-                st.session_state.logged_in = True
-                st.session_state.user = username
-                st.session_state.role = "user"
                 log_user_activity(username, "New User Signup via HTML")
-                st.success("Account Created! Logging you in...")
-                st.query_params.clear() # Clean URL
-                st.rerun()
+                st.success("Account Created! Redirecting to login page...")
+                st.markdown('<meta http-equiv="refresh" content="3;url=login.html" />', unsafe_allow_html=True)
+                st.stop()
             else:
                 st.error("Username already exists. Please try a different one.")
         
