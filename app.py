@@ -745,6 +745,9 @@ if menu == "Dashboard":
     map_df = filtered_df.copy()
     map_df = add_coordinates(map_df)
     map_df = map_df.dropna(subset=["Lat", "Lon"])
+    # Ensure AQI is numeric and drop rows with missing coordinates or AQI
+    map_df["AQI"] = pd.to_numeric(map_df["AQI"], errors='coerce')
+    map_df = map_df.dropna(subset=["Lat", "Lon", "AQI"])
     
     if not map_df.empty:
         map_df["Date_Str"] = map_df["Date"].dt.strftime('%Y-%m-%d')
