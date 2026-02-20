@@ -354,11 +354,86 @@ st.sidebar.selectbox("🎨 Theme", ["Light", "Dark"], key="theme")
 if st.session_state.theme == "Dark":
     st.markdown("""
     <style>
-    [data-testid="stAppViewContainer"] { background-color: #0E1117; color: white; }
-    [data-testid="stSidebar"] { background-color: #262730; }
-    [data-testid="stHeader"] { background-color: rgba(0,0,0,0); }
-    .stMarkdown, p, h1, h2, h3, h4, h5, h6, label, span { color: white !important; }
-    div[data-testid="stMetricValue"] { color: white !important; }
+    @keyframes gradientBG {
+        0% { background-position: 0% 50%; }
+        50% { background-position: 100% 50%; }
+        100% { background-position: 0% 50%; }
+    }
+
+    /* Main container */
+    [data-testid="stAppViewContainer"] {
+        background: linear-gradient(-45deg, #0f2027, #203a43, #2c5364);
+        background-size: 200% 200%;
+        animation: gradientBG 20s ease infinite;
+        color: #E0E0E0;
+    }
+
+    /* Sidebar */
+    [data-testid="stSidebar"] {
+        background: rgba(38, 39, 48, 0.6);
+        backdrop-filter: blur(10px);
+        border-right: 1px solid rgba(255, 255, 255, 0.1);
+    }
+
+    /* Make all text in sidebar and main area white for contrast */
+    .stMarkdown, p, h1, h2, h3, h4, h5, h6, label, .st-b, .st-at, .st-ar, .st-as   {
+       color: #FFFFFF !important;
+    }
+    
+    /* Headers */
+    h1, h2, h3 {
+        font-weight: 600;
+    }
+
+    /* Metric labels and values */
+    [data-testid="stMetricLabel"] {
+        color: #A0AEC0; /* Softer gray */
+    }
+    [data-testid="stMetricValue"] {
+        color: #FFFFFF;
+        font-size: 2.5rem;
+    }
+    
+    /* Expander headers */
+    [data-testid="stExpander"] summary {
+        background-color: rgba(255, 255, 255, 0.05);
+        border-radius: 0.5rem;
+        color: #E0E0E0;
+    }
+    
+    /* Charts - make background transparent to show gradient */
+    .stPlotlyChart {
+        background-color: transparent !important;
+    }
+    iframe {
+        background-color: transparent !important;
+    }
+
+    /* Buttons */
+    .stButton>button {
+        border: 2px solid #4facfe;
+        background: transparent;
+        color: #4facfe !important; /* Important to override default */
+        border-radius: 25px;
+        padding: 10px 20px;
+        transition: all 0.3s ease;
+        font-weight: 600;
+    }
+    .stButton>button:hover {
+        background-color: #4facfe;
+        color: white !important; /* Important to override default */
+        box-shadow: 0 0 15px #4facfe;
+        transform: translateY(-2px);
+    }
+    .stButton>button:active {
+        transform: translateY(0);
+    }
+    
+    /* Selectbox dropdown */
+    [data-testid="stSelectbox"] {
+        border-radius: 0.5rem;
+    }
+
     </style>
     """, unsafe_allow_html=True)
     chart_template = "plotly_dark"
