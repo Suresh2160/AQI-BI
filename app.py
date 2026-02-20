@@ -12,15 +12,9 @@ from google.oauth2 import id_token
 from google.auth.transport import requests as google_requests
 import smtplib
 from email.message import EmailMessage
-from prophet import Prophet
-from prophet.plot import plot_plotly
-import plotly.graph_objects as go
-import schedule
-import time
-import threading
 
 # ---------------- PAGE CONFIG ----------------
-st.set_page_config(page_title="AQIs Dashboard", page_icon="🌍", layout="wide")
+st.set_page_config(page_title="AQI Dashboard", page_icon="🌍", layout="wide")
 
 # ---------------- SESSION INIT ----------------
 if "logged_in" not in st.session_state:
@@ -140,74 +134,9 @@ def init_user_db():
     except sqlite3.OperationalError:
         cursor.execute("ALTER TABLE feedback ADD COLUMN status TEXT DEFAULT 'Pending'")
 
-    # Create Forecasts Table
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS forecasts (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            city TEXT,
-            forecast_date DATE,
-            predicted_aqi REAL,
-            lower_bound REAL,
-            upper_bound REAL,
-            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-
     conn.commit()
     conn.close()
 
-# ---------------- BACKGROUND JOB (Daily Forecasts) ----------------
-def generate_daily_forecasts():
-    """Generates forecasts for all cities for the next 7 days."""
-    try:
-        print("🔄 Starting Daily Forecast Job...")
-        conn = sqlite3.connect("aqi.db")
-        # Get list of cities from existing data
-        cities_df = pd.read_sql_query("SELECT DISTINCT City FROM air_quality", conn)
-        cities = cities_df["City"].tolist()
-        
-        # Load data for training
-        full_df = pd.read_sql_query("SELECT City, Date, AQI FROM air_quality", conn)
-        full_df["Date"] = pd.to_datetime(full_df["Date"], errors="coerce")
-        
-        cursor = conn.cursor()
-        
-        for city in cities:
-            p_df = full_df[full_df["City"] == city][["Date", "AQI"]].dropna()
-            if len(p_df) > 20:
-                p_df = p_df.rename(columns={"Date": "ds", "AQI": "y"}).sort_values("ds")
-                m = Prophet()
-                m.fit(p_df)
-                future = m.make_future_dataframe(periods=7) # Forecast next 7 days
-                forecast = m.predict(future)
-                
-                # Save last 7 days (future)
-                future_data = forecast.tail(7)
-                for _, row in future_data.iterrows():
-                    cursor.execute("""
-                        INSERT INTO forecasts (city, forecast_date, predicted_aqi, lower_bound, upper_bound) 
-                        VALUES (?, ?, ?, ?, ?)
-                    """, (city, row['ds'].date(), row['yhat'], row['yhat_lower'], row['yhat_upper']))
-        
-        conn.commit()
-        conn.close()
-        print("✅ Daily Forecast Job Completed.")
-    except Exception as e:
-        print(f"❌ Error in Daily Forecast Job: {e}")
-
-@st.cache_resource
-def start_background_scheduler():
-    schedule.every().day.at("00:00").do(generate_daily_forecasts)
-    def run_schedule():
-        while True:
-            schedule.run_pending()
-            time.sleep(60)
-    t = threading.Thread(target=run_schedule, daemon=True)
-    t.start()
-    return t
-
-# Start the background scheduler
-start_background_scheduler()
 
 def log_user_activity(username, action):
     try:
@@ -356,12 +285,11 @@ df["AQI_Category"] = df["AQI"].apply(aqi_category)
 
 
 # ---------------- AUTH UI ----------------
-if not st.session_state.logged_in:
-    qp = st.query_params
+if st.session_state.logged_in == False:
 
-    # Priority 1: Handle form submissions and API-like actions
-    if "token" in qp:  # Google Login
-        token = qp.get("token")
+    # Check for Google Login Token in URL (passed from login.html)
+    if "token" in st.query_params:
+        token = st.query_params["token"]
         email, role = login_google_user(token)
         if email:
             st.session_state.logged_in = True
@@ -369,32 +297,27 @@ if not st.session_state.logged_in:
             st.session_state.role = role
             log_user_activity(email, "Login via Google")
             st.success(f"Login Successful with Google: {email} ✅")
-            st.query_params.clear()
             st.rerun()
 
-    elif "reset_email" in qp:  # Password Reset Request
-        r_email = qp.get("reset_email")
+    # Check for Password Reset Request (passed from forgot_password.html)
+    if "reset_email" in st.query_params:
+        r_email = st.query_params["reset_email"]
         if send_reset_email(r_email):
             st.success(f"✅ Password reset link has been sent to: {r_email}")
         else:
             st.error("❌ Failed to send email. Please check server logs or SMTP configuration.")
-        st.stop()
 
-    elif "username" in qp and "password" in qp:  # Standard Login/Signup
-        username = qp.get("username")
-        password = qp.get("password")
+    st.markdown("<h1 style='text-align:center;'>🌍 AQI Dashboard System</h1>", unsafe_allow_html=True)
+    st.markdown("<h4 style='text-align:center;'>Signup / Login Portal</h4>", unsafe_allow_html=True)
 
-        if "email" in qp:  # Signup action
-            if signup_user(username, password):
-                log_user_activity(username, "New User Signup via HTML")
-                st.success("Account Created! Redirecting to login page...")
-                st.markdown('<meta http-equiv="refresh" content="2;url=/?action=login" />', unsafe_allow_html=True)
-                st.stop()
-            else:
-                st.error("Username already exists. Redirecting to registration page...")
-                st.markdown('<meta http-equiv="refresh" content="3;url=/" />', unsafe_allow_html=True)
-                st.stop()
-        else:  # Login action
+    tab1, tab2 = st.tabs(["🔑 Login", "📝 Signup"])
+
+    with tab1:
+        st.subheader("Login Account")
+        username = st.text_input("Username", key="login_user")
+        password = st.text_input("Password", type="password", key="login_pass")
+
+        if st.button("Login"):
             success, role = login_user(username, password)
             if success:
                 st.session_state.logged_in = True
@@ -402,31 +325,23 @@ if not st.session_state.logged_in:
                 st.session_state.role = role
                 log_user_activity(username, "Login via Password")
                 st.success("Login Successful ✅")
-                st.query_params.clear()
                 st.rerun()
             else:
-                st.error("Invalid username or password. Please try again.")
-                st.markdown('<meta http-equiv="refresh" content="2;url=/?action=login" />', unsafe_allow_html=True)
-                st.stop()
+                st.error("Invalid username or password ❌")
 
-    # Priority 2: Display the correct HTML page if no action was taken
-    else:
-        action = qp.get("action")
-        if action == "login":
-            try:
-                with open("login.html", "r", encoding="utf-8") as f:
-                    login_html = f.read()
-                st.markdown(login_html, unsafe_allow_html=True)
-            except FileNotFoundError:
-                st.error("login.html not found.")
-        else:
-            try:
-                with open("reg.html", "r", encoding="utf-8") as f:
-                    reg_html = f.read()
-                st.markdown(reg_html, unsafe_allow_html=True)
-            except FileNotFoundError:
-                st.error("reg.html not found.")
-        st.stop()
+    with tab2:
+        st.subheader("Create New Account")
+        new_username = st.text_input("New Username", key="signup_user")
+        new_password = st.text_input("New Password", type="password", key="signup_pass")
+
+        if st.button("Signup"):
+            if signup_user(new_username, new_password):
+                log_user_activity(new_username, "New User Signup")
+                st.success("Account Created Successfully ✅ Please Login Now")
+            else:
+                st.error("Username already exists ❌")
+
+    st.stop()
 
 
 # ---------------- SIDEBAR MENU ----------------
@@ -450,7 +365,7 @@ if st.session_state.theme == "Dark":
 else:
     chart_template = "plotly"
 
-menu_options = ["Dashboard", "City Comparison", "Health Advice", "Travel Recommendation", "Prediction", "Forecast Manager", "Report Download", "Raw Data", "Profile", "Feedback"]
+menu_options = ["Dashboard", "City Comparison", "Health Advice", "Prediction", "Report Download", "Raw Data", "Profile", "Feedback"]
 if st.session_state.role == "admin":
     menu_options.append("User Management")
 
@@ -810,31 +725,6 @@ elif menu == "City Comparison":
         else:
             st.warning("Coordinates not available for selected cities to display map.")
 
-        # Anomaly Rate Comparison
-        st.write("---")
-        st.subheader("🚨 Anomaly Rate Comparison")
-        
-        anomaly_data = []
-        for city in comp_cities:
-            city_df = df[df["City"] == city].sort_values("Date")
-            if not city_df.empty:
-                # Rolling stats (same logic as Dashboard)
-                window = 7
-                city_df["Rolling_Mean"] = city_df["AQI"].rolling(window=window).mean()
-                city_df["Rolling_Std"] = city_df["AQI"].rolling(window=window).std()
-                city_df["Upper"] = city_df["Rolling_Mean"] + (2 * city_df["Rolling_Std"])
-                city_df["Lower"] = city_df["Rolling_Mean"] - (2 * city_df["Rolling_Std"])
-                
-                anomalies = city_df[(city_df["AQI"] > city_df["Upper"]) | (city_df["AQI"] < city_df["Lower"])]
-                rate = (len(anomalies) / len(city_df)) * 100
-                anomaly_data.append({"City": city, "Anomaly Rate (%)": rate, "Count": len(anomalies)})
-        
-        if anomaly_data:
-            anom_comp_df = pd.DataFrame(anomaly_data)
-            fig_anom_comp = px.bar(anom_comp_df, x="City", y="Anomaly Rate (%)", color="City", 
-                                   text_auto=True, title="Percentage of Anomalous Days by City", template=chart_template)
-            st.plotly_chart(fig_anom_comp, use_container_width=True)
-
 # ---------------- HEALTH ADVICE PAGE ----------------
 elif menu == "Health Advice":
     st.title("❤️ Health Advice & Recommendations")
@@ -878,254 +768,39 @@ elif menu == "Health Advice":
             else:
                 st.write("- 🌳 It is a great day to be outside!")
 
-# ---------------- TRAVEL RECOMMENDATION PAGE ----------------
-elif menu == "Travel Recommendation":
-    st.title("✈️ Best City to Visit (AQI Recommender)")
-    st.write("Find the best destination with the cleanest air for your travel dates.")
-
-    travel_date = st.date_input("Select Travel Date", min_value=min_date, value=pd.to_datetime("today"))
-
-    if st.button("Find Best Cities"):
-        # 1. Check if we have a forecast for this date in the database
-        conn = sqlite3.connect("aqi.db")
-        forecast_df = pd.read_sql_query("SELECT city, predicted_aqi FROM forecasts WHERE forecast_date = ?", conn, params=(travel_date,))
-        conn.close()
-
-        rec_source = ""
-        recommendations = pd.DataFrame()
-
-        if not forecast_df.empty:
-            rec_source = "Based on AI Forecasts 🤖"
-            recommendations = forecast_df.sort_values("predicted_aqi").head(5)
-            recommendations.rename(columns={"city": "City", "predicted_aqi": "Expected AQI"}, inplace=True)
-        else:
-            # 2. Fallback: Use Historical Average for this Month
-            rec_source = "Based on Historical Averages (Seasonality) 📅"
-            month = travel_date.month
-            hist_df = df[df["Date"].dt.month == month]
-            if not hist_df.empty:
-                avg_aqi = hist_df.groupby("City")["AQI"].mean().reset_index()
-                recommendations = avg_aqi.sort_values("AQI").head(5)
-                recommendations.rename(columns={"AQI": "Expected AQI"}, inplace=True)
-        
-        if not recommendations.empty:
-            st.success(f"✅ Top Recommendations for {travel_date} ({rec_source})")
-            
-            cols = st.columns(len(recommendations))
-            for idx, (i, row) in enumerate(recommendations.iterrows()):
-                with cols[idx]:
-                    aqi_val = round(row['Expected AQI'], 1)
-                    st.metric(label=row['City'], value=aqi_val, delta=aqi_category(aqi_val), delta_color="inverse")
-            
-            st.dataframe(recommendations, use_container_width=True)
-        else:
-            st.warning("Not enough data to generate recommendations.")
-
 # ---------------- PREDICTION PAGE ----------------
 elif menu == "Prediction":
 
-    st.title("🤖 AQI Prediction & Forecasting")
-    
-    tab_pred, tab_forecast = st.tabs(["🧪 Pollutant-based Prediction", "📅 Future Trend Forecasting (Prophet)"])
-    tab_pred, tab_forecast, tab_whatif = st.tabs(["🧪 Pollutant-based Prediction", "📅 Future Trend Forecasting (Prophet)", "🎛️ What-If Analysis"])
-    
-    with tab_pred:
-        st.subheader("Predict AQI based on Pollutants (Linear Regression)")
-        train_df = df[["PM25", "PM10", "NO2", "SO2", "CO", "O3", "AQI"]].dropna()
+    st.title("🤖 AQI Prediction (Machine Learning)")
+    train_df = df[["PM25", "PM10", "NO2", "SO2", "CO", "O3", "AQI"]].dropna()
 
-        X = train_df[["PM25", "PM10", "NO2", "SO2", "CO", "O3"]]
-        y = train_df["AQI"]
+    X = train_df[["PM25", "PM10", "NO2", "SO2", "CO", "O3"]]
+    y = train_df["AQI"]
 
-        model = LinearRegression()
-        model.fit(X, y)
+    model = LinearRegression()
+    model.fit(X, y)
 
-        col1, col2, col3 = st.columns(3)
+    col1, col2, col3 = st.columns(3)
 
-        with col1:
-            pm25 = st.number_input("PM2.5", value=50.0)
-            pm10 = st.number_input("PM10", value=80.0)
+    with col1:
+        pm25 = st.number_input("PM2.5", value=50.0)
+        pm10 = st.number_input("PM10", value=80.0)
 
-        with col2:
-            no2 = st.number_input("NO2", value=20.0)
-            so2 = st.number_input("SO2", value=10.0)
+    with col2:
+        no2 = st.number_input("NO2", value=20.0)
+        so2 = st.number_input("SO2", value=10.0)
 
-        with col3:
-            co = st.number_input("CO", value=1.0)
-            o3 = st.number_input("O3", value=30.0)
+    with col3:
+        co = st.number_input("CO", value=1.0)
+        o3 = st.number_input("O3", value=30.0)
 
-        if st.button("🔮 Predict AQI"):
-            prediction = model.predict([[pm25, pm10, no2, so2, co, o3]])
-            pred_val = round(prediction[0], 2)
+    if st.button("🔮 Predict AQI"):
+        prediction = model.predict([[pm25, pm10, no2, so2, co, o3]])
+        pred_val = round(prediction[0], 2)
 
-            st.success(f"✅ Predicted AQI = {pred_val}")
-            st.info(f"📌 AQI Category: {aqi_category(pred_val)}")
+        st.success(f"✅ Predicted AQI = {pred_val}")
+        st.info(f"📌 AQI Category: {aqi_category(pred_val)}")
 
-    with tab_forecast:
-        st.subheader("Forecast Future AQI Trends (Prophet)")
-        st.write("Uses historical data to predict future AQI trends.")
-        
-        p_city = st.selectbox("Select City for Forecasting", city_list, key="prophet_city")
-        days_to_predict = st.slider("Days to Forecast", 7, 365, 30)
-        
-        if st.button("Generate Forecast"):
-            with st.spinner("Training Prophet model..."):
-                # Prepare data for Prophet (ds, y)
-                p_df = df[df["City"] == p_city][["Date", "AQI"]].dropna()
-                p_df = p_df.rename(columns={"Date": "ds", "AQI": "y"}).sort_values("ds")
-                
-                if len(p_df) > 20:
-                    try:
-                        m = Prophet()
-                        m.fit(p_df)
-                        future = m.make_future_dataframe(periods=days_to_predict)
-                        forecast = m.predict(future)
-                        
-                        st.session_state['last_forecast'] = {'city': p_city, 'data': forecast, 'days': days_to_predict}
-                        
-                        st.success(f"Forecast generated for {p_city}!")
-                        
-                        st.write(f"### 🔮 Forecast for next {days_to_predict} days")
-                        fig_prophet = plot_plotly(m, forecast)
-                        st.plotly_chart(fig_prophet, use_container_width=True)
-                        
-                        with st.expander("View Forecast Data"):
-                            st.dataframe(forecast[['ds', 'yhat', 'yhat_lower', 'yhat_upper']].tail(days_to_predict))
-                            
-                        st.write("#### Trend Components")
-                        fig_comp = m.plot_components(forecast)
-                        st.pyplot(fig_comp)
-                        
-                    except Exception as e:
-                        st.error(f"Error during forecasting: {e}")
-                else:
-                    st.warning("Not enough historical data to train the model (need at least 20 points).")
-
-        if 'last_forecast' in st.session_state:
-            st.write("---")
-            if st.button("💾 Save Forecast to Database"):
-                try:
-                    f_data = st.session_state['last_forecast']
-                    conn = sqlite3.connect("aqi.db")
-                    cursor = conn.cursor()
-                    
-                    # Save only the future predictions
-                    future_data = f_data['data'].tail(f_data['days'])
-                    
-                    for _, row in future_data.iterrows():
-                        cursor.execute("""
-                            INSERT INTO forecasts (city, forecast_date, predicted_aqi, lower_bound, upper_bound) 
-                            VALUES (?, ?, ?, ?, ?)
-                        """, (f_data['city'], row['ds'].date(), row['yhat'], row['yhat_lower'], row['yhat_upper']))
-                    
-                    conn.commit()
-                    conn.close()
-                    st.success(f"✅ Forecast for {f_data['city']} saved successfully!")
-                    log_user_activity(st.session_state.user, f"Saved forecast for {f_data['city']}")
-                except Exception as e:
-                    st.error(f"Error saving forecast: {e}")
-
-    with tab_whatif:
-        st.subheader("🎛️ Interactive What-If Analysis")
-        st.write("Adjust pollutant levels to simulate scenarios and see the impact on AQI.")
-        
-        wi_city = st.selectbox("Select Baseline City", city_list, key="wi_city")
-        
-        # Train model on full dataset for the What-If tool
-        train_df_wi = df[["PM25", "PM10", "NO2", "SO2", "CO", "O3", "AQI"]].dropna()
-        X_wi = train_df_wi[["PM25", "PM10", "NO2", "SO2", "CO", "O3"]]
-        y_wi = train_df_wi["AQI"]
-        model_wi = LinearRegression()
-        model_wi.fit(X_wi, y_wi)
-
-        # Get baseline data for selected city
-        city_stats = df[df["City"] == wi_city][["PM25", "PM10", "NO2", "SO2", "CO", "O3"]].mean()
-        
-        col_wi1, col_wi2 = st.columns(2)
-        input_vals = []
-        pollutants = ["PM25", "PM10", "NO2", "SO2", "CO", "O3"]
-        
-        for i, pol in enumerate(pollutants):
-            base_val = city_stats[pol] if not np.isnan(city_stats[pol]) else 0.0
-            with col_wi1 if i < 3 else col_wi2:
-                val = st.slider(f"{pol} Level", 0.0, float(base_val * 3) + 50.0, float(base_val), key=f"wi_{pol}")
-                input_vals.append(val)
-        
-        # Real-time Prediction
-        wi_pred = model_wi.predict([input_vals])[0]
-        
-        st.write("---")
-        st.metric("Predicted AQI (What-If)", round(wi_pred, 2), delta=round(wi_pred - df[df["City"]==wi_city]["AQI"].mean(), 2), delta_color="inverse")
-        st.info(f"📌 Predicted Category: **{aqi_category(wi_pred)}**")
-
-# ---------------- FORECAST MANAGER PAGE ----------------
-elif menu == "Forecast Manager":
-    st.title("🔮 Forecast Manager & Verification")
-
-    # 1. View/Delete Forecasts
-    st.subheader("📂 Saved Forecasts")
-    conn = sqlite3.connect("aqi.db")
-    forecasts_df = pd.read_sql_query("SELECT * FROM forecasts ORDER BY created_at DESC", conn)
-    conn.close()
-
-    st.dataframe(forecasts_df, use_container_width=True)
-
-    if not forecasts_df.empty:
-        # Create a readable label for batches (City + Created Date)
-        forecasts_df['batch_label'] = forecasts_df['city'] + " (Generated: " + forecasts_df['created_at'] + ")"
-        unique_batches = forecasts_df['batch_label'].unique()
-
-        with st.expander("🗑️ Delete Forecasts"):
-            batch_to_delete = st.selectbox("Select Forecast Batch to Delete", unique_batches)
-            if st.button("Delete Batch"):
-                # Filter IDs belonging to this batch
-                ids_to_delete = forecasts_df[forecasts_df['batch_label'] == batch_to_delete]['id'].tolist()
-                
-                conn = sqlite3.connect("aqi.db")
-                cursor = conn.cursor()
-                placeholders = ', '.join('?' for _ in ids_to_delete)
-                cursor.execute(f"DELETE FROM forecasts WHERE id IN ({placeholders})", ids_to_delete)
-                conn.commit()
-                conn.close()
-                log_user_activity(st.session_state.user, f"Deleted forecast batch: {batch_to_delete}")
-                st.success("Forecast batch deleted successfully.")
-                st.rerun()
-
-        # 2. Compare with Actuals
-        st.write("---")
-        st.subheader("📉 Compare Forecast vs Actual Data")
-        st.write("Verify the accuracy of past forecasts by comparing them with actual recorded AQI data.")
-
-        selected_batch = st.selectbox("Select Forecast to Verify", unique_batches, key="verify_batch")
-
-        # Get forecast data for this batch
-        batch_data = forecasts_df[forecasts_df['batch_label'] == selected_batch].copy()
-        city_name = batch_data.iloc[0]['city']
-
-        # Prepare Data for Merge
-        batch_data['forecast_date'] = pd.to_datetime(batch_data['forecast_date'])
-        
-        actual_data = df[df['City'] == city_name][['Date', 'AQI']].copy()
-        actual_data['Date'] = pd.to_datetime(actual_data['Date'])
-
-        # Merge Forecast with Actuals
-        comparison_df = pd.merge(batch_data, actual_data, left_on='forecast_date', right_on='Date', how='inner', suffixes=('_pred', '_actual'))
-
-        if not comparison_df.empty:
-            # Calculate Error Metrics
-            mae = np.mean(np.abs(comparison_df['predicted_aqi'] - comparison_df['AQI']))
-            st.metric("Mean Absolute Error (MAE)", round(mae, 2), help="Lower is better. Represents average deviation from actual AQI.")
-
-            # Plot Comparison
-            fig_verify = go.Figure()
-            fig_verify.add_trace(go.Scatter(x=comparison_df['forecast_date'], y=comparison_df['AQI'], mode='lines+markers', name='Actual AQI', line=dict(color='green')))
-            fig_verify.add_trace(go.Scatter(x=comparison_df['forecast_date'], y=comparison_df['predicted_aqi'], mode='lines+markers', name='Predicted AQI', line=dict(dash='dash', color='blue')))
-            fig_verify.add_trace(go.Scatter(x=comparison_df['forecast_date'], y=comparison_df['upper_bound'], mode='lines', name='Upper Bound', line=dict(width=0), showlegend=False))
-            fig_verify.add_trace(go.Scatter(x=comparison_df['forecast_date'], y=comparison_df['lower_bound'], mode='lines', name='Lower Bound', line=dict(width=0), fill='tonexty', fillcolor='rgba(0,100,255,0.2)', showlegend=False))
-            
-            fig_verify.update_layout(title=f"Forecast Verification for {city_name}", template=chart_template, hovermode="x unified")
-            st.plotly_chart(fig_verify, use_container_width=True)
-        else:
-            st.warning(f"No overlapping actual data found for this forecast period in {city_name}. Wait for new data to be recorded.")
 
 # ---------------- REPORT DOWNLOAD PAGE ----------------
 elif menu == "Report Download":
@@ -1515,6 +1190,53 @@ if st.session_state.chat_open:
         st.rerun()
 
     # Input
+    user_msg = st.text_input("Type your message", key="chat_input_msg")
+
+    if st.button("Send", key="send_btn"):
+
+        if user_msg.strip():
+            st.session_state.chat_history.append({"role": "user", "content": user_msg})
+
+            # Suggested city data
+            city_data = df[df["City"] == suggested_city] if suggested_city else df
+            avg_aqi = city_data["AQI"].mean()
+
+            prompt = f"""
+You are an Air Quality AI Assistant.
+
+User location: {location_text}
+Nearest City found in database: {suggested_city if suggested_city else "Not Found"}
+Average AQI for that city: {avg_aqi}
+
+User question: {user_msg}
+
+Give:
+1. Simple answer
+2. Health advice
+3. Suggestions like mask / indoor / outdoor
+4. Warning if AQI is severe
+"""
+
+            try:
+                response = client.chat.completions.create(
+                    model="gpt-4o-mini",
+                    messages=[{"role": "user", "content": prompt}],
+                    temperature=0.6
+                )
+
+                ai_reply = response.choices[0].message.content
+
+            except Exception as e:
+                ai_reply = f"⚠️ OpenAI Error: {e}"
+
+            st.session_state.chat_history.append({"role": "assistant", "content": ai_reply})
+            st.rerun()
+
+    if st.button("❌ Close Chat", key="close_chat"):
+        st.session_state.chat_open = False
+        st.rerun()
+
+    st.markdown("</div>", unsafe_allow_html=True)
     user_msg = st.text_input("Type your message", key="chat_input_msg")
 
     if st.button("Send", key="send_btn"):

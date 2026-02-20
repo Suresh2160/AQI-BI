@@ -1,12 +1,9 @@
 streamlit
 pandas
+numpy
 plotly
 scikit-learn
 fpdf
-numpy
 requests
 bcrypt
 openai
-google-auth
-prophet
-schedule
