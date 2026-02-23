@@ -1611,40 +1611,47 @@ elif menu == "Health Advice":
             st.info(f"📌 AQI Category: {aqi_category(pred_val)}")
 # ---------------- NEWS FEED PAGE ----------------
 elif menu == "News Feed":
+
     st.title("📰 Global Air Quality News")
     st.write(
         "Latest updates on air pollution, environmental policies, and health advisories."
     )
 
-    news_items = fetch_aqi_news()
+    # ✅ Safe way to get API key
+    api_key = st.secrets.get("NEWS_API_KEY")
 
-    if news_items is None:
-        st.warning(
-            "⚠️ News API Key is missing. Please add your API key in the code to fetch real-time news."
-        )
+    if not api_key:
+        st.warning("⚠️ News API Key is missing.")
+        st.markdown("👉 Add your API key in Streamlit Secrets.")
         st.markdown("[Get a free API Key from NewsAPI.org](https://newsapi.org/)")
-    elif not news_items:
+        st.stop()
+
+    # Fetch news with API key
+    news_items = fetch_aqi_news(api_key)
+
+    if not news_items:
         st.info("No news articles found at the moment.")
     else:
-        for article in news_items[:10]:  # Show top 10
+        for article in news_items[:10]:
+
             with st.container():
                 col_img, col_text = st.columns([1, 3])
 
                 with col_img:
                     if article.get("urlToImage"):
-                        st.image(article["urlToImage"], use_container_width=True)
+                        st.image(article["urlToImage"], width="stretch")
                     else:
                         st.markdown("📷 *No Image*")
 
                 with col_text:
-                    st.subheader(f"[{article['title']}]({article['url']})")
+                    st.subheader(f"[{article.get('title','No Title')}]({article.get('url','#')})")
                     st.caption(
-                        f"Source: {article['source']['name']} | Published: {article['publishedAt'][:10]}"
+                        f"Source: {article.get('source',{}).get('name','Unknown')} | "
+                        f"Published: {article.get('publishedAt','')[:10]}"
                     )
-                    st.write(article["description"])
+                    st.write(article.get("description", "No description available."))
 
                 st.write("---")
-
 # ---------------- REPORT DOWNLOAD PAGE ----------------
 elif menu == "Report Download":
 
