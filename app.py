@@ -78,7 +78,12 @@ if "theme" not in st.session_state:
 # ---------------- OPENAI CLIENT ----------------
 client = OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
 
-
+if st.button("Test OpenAI"):
+    test = client.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=[{"role": "user", "content": "Hello"}]
+    )
+    st.write(test.choices[0].message.content)
 # ---------------- LOCATION DETECTION ----------------
 def get_user_location():
     try:
@@ -93,24 +98,29 @@ def get_user_location():
 
 
 # ---------------- WEATHER API ----------------
+import requests
+
 def get_weather_data(city):
     try:
-        # Using wttr.in for weather data (JSON format)
         url = f"https://wttr.in/{city}?format=j1"
-        response = requests.get(url, timeout=2)
+        response = requests.get(url, timeout=5)
+
+        if response.status_code != 200:
+            return None
+
         data = response.json()
         current = data["current_condition"][0]
+
         return {
-            "temp": current["temp_C"],
-            "humidity": current["humidity"],
-            "desc": current["weatherDesc"][0]["value"],
-            "wind": current["windspeedKmph"],
-            "wind_dir": current["winddirDegree"],
+            "temp": current.get("temp_C"),
+            "humidity": current.get("humidity"),
+            "desc": current.get("weatherDesc", [{}])[0].get("value"),
+            "wind": current.get("windspeedKmph"),
+            "wind_dir": current.get("winddirDegree"),
         }
-    except:
+
+    except Exception:
         return None
-
-
 # ---------------- CITY COORDINATES ----------------
 CITY_COORDINATES = {
     "Ahmedabad": [23.0225, 72.5714],
