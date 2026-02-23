@@ -1569,65 +1569,111 @@ elif menu == "Health Advice":
 
     # ---------------- PREDICTION PAGE ----------------
     elif menu == "Prediction":
+# ---------------- PREDICTION PAGE ----------------
+elif menu == "Prediction":
 
         st.title("🤖 AQI Prediction (Machine Learning)")
+    st.title("🤖 AQI Prediction (Machine Learning)")
 
         train_df = df[["PM25", "PM10", "NO2", "SO2", "CO", "O3", "AQI"]].dropna()
+    train_df = df[["PM25", "PM10", "NO2", "SO2", "CO", "O3", "AQI"]].dropna()
 
         X = train_df[["PM25", "PM10", "NO2", "SO2", "CO", "O3"]]
         y = train_df["AQI"]
+    X = train_df[["PM25", "PM10", "NO2", "SO2", "CO", "O3"]]
+    y = train_df["AQI"]
 
         from sklearn.model_selection import train_test_split
         from sklearn.linear_model import LinearRegression
         from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
         import numpy as np
+    from sklearn.model_selection import train_test_split
+    from sklearn.linear_model import LinearRegression
+    from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
+    import numpy as np
 
         # ✅ Split data
         X_train, X_test, y_train, y_test = train_test_split(
             X, y, test_size=0.2, random_state=42
         )
+    # ✅ Split data
+    X_train, X_test, y_train, y_test = train_test_split(
+        X, y, test_size=0.2, random_state=42
+    )
 
         # ✅ Train model FIRST
         model = LinearRegression()
         model.fit(X_train, y_train)
+    # ✅ Train model FIRST
+    model = LinearRegression()
+    model.fit(X_train, y_train)
 
         # ✅ Then predict
         y_pred = model.predict(X_test)
+    # ✅ Then predict
+    y_pred = model.predict(X_test)
 
         # ✅ Evaluation metrics
         mae = mean_absolute_error(y_test, y_pred)
         mse = mean_squared_error(y_test, y_pred)
         rmse = np.sqrt(mse)
         r2 = r2_score(y_test, y_pred)
+    # ✅ Evaluation metrics
+    mae = mean_absolute_error(y_test, y_pred)
+    mse = mean_squared_error(y_test, y_pred)
+    rmse = np.sqrt(mse)
+    r2 = r2_score(y_test, y_pred)
 
         # ---------------- SHOW PERFORMANCE ----------------
         st.subheader("📊 Model Performance")
         st.write(f"R² Score: {r2:.2f}")
         st.write(f"MAE: {mae:.2f}")
         st.write(f"RMSE: {rmse:.2f}")
+    # ---------------- SHOW PERFORMANCE ----------------
+    st.subheader("📊 Model Performance")
+    st.write(f"R² Score: {r2:.2f}")
+    st.write(f"MAE: {mae:.2f}")
+    st.write(f"RMSE: {rmse:.2f}")
 
         # ---------------- INPUT SECTION ----------------
         col1, col2, col3 = st.columns(3)
+    # ---------------- INPUT SECTION ----------------
+    col1, col2, col3 = st.columns(3)
 
         with col1:
             pm25 = st.number_input("PM2.5", value=50.0)
             pm10 = st.number_input("PM10", value=80.0)
+    with col1:
+        pm25 = st.number_input("PM2.5", value=50.0)
+        pm10 = st.number_input("PM10", value=80.0)
 
         with col2:
             no2 = st.number_input("NO2", value=20.0)
             so2 = st.number_input("SO2", value=10.0)
+    with col2:
+        no2 = st.number_input("NO2", value=20.0)
+        so2 = st.number_input("SO2", value=10.0)
 
         with col3:
             co = st.number_input("CO", value=1.0)
             o3 = st.number_input("O3", value=30.0)
+    with col3:
+        co = st.number_input("CO", value=1.0)
+        o3 = st.number_input("O3", value=30.0)
 
         # ---------------- PREDICTION ----------------
         if st.button("🔮 Predict AQI"):
             prediction = model.predict([[pm25, pm10, no2, so2, co, o3]])
             pred_val = round(prediction[0], 2)
+    # ---------------- PREDICTION ----------------
+    if st.button("🔮 Predict AQI"):
+        prediction = model.predict([[pm25, pm10, no2, so2, co, o3]])
+        pred_val = round(prediction[0], 2)
 
             st.success(f"✅ Predicted AQI = {pred_val}")
             st.info(f"📌 AQI Category: {aqi_category(pred_val)}")
+        st.success(f"✅ Predicted AQI = {pred_val}")
+        st.info(f"📌 AQI Category: {aqi_category(pred_val)}")
 # ---------------- NEWS FEED PAGE ----------------
 elif menu == "News Feed":
 
