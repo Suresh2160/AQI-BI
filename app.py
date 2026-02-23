@@ -98,10 +98,6 @@ def get_user_location():
 
 
 # ---------------- WEATHER API ----------------
-import requests
-
-def get_weather_data(city):
-    try:
         url = f"https://wttr.in/{city}?format=j1"
         response = requests.get(url, timeout=5)
 
