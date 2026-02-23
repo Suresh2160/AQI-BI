@@ -48,7 +48,7 @@ cookie_theme = cookie_manager.get(cookie="theme")
 
 if "theme" not in st.session_state:
     # If cookie exists, use it; otherwise default to Dark
-    st.session_state.theme = cookie_theme if cookie_theme else "Dark"
+    st.session_state.theme = cookie_theme if cookie_theme else "Light"
 
 
 # ---------------- OPENAI CLIENT ----------------
@@ -265,13 +265,17 @@ def init_user_db():
         cursor.execute("ALTER TABLE users ADD COLUMN subscription INTEGER DEFAULT 0")
 
     # Create Settings Table (For Maintenance Mode)
-    cursor.execute("""
+    cursor.execute(
+        """
         CREATE TABLE IF NOT EXISTS settings (
             key TEXT PRIMARY KEY,
             value TEXT
         )
-    """)
-    cursor.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('maintenance_mode', 'false')")
+    """
+    )
+    cursor.execute(
+        "INSERT OR IGNORE INTO settings (key, value) VALUES ('maintenance_mode', 'false')"
+    )
 
     conn.commit()
     conn.close()
@@ -290,6 +294,7 @@ def log_user_activity(username, action):
     except:
         pass
 
+
 # ---------------- SETTINGS HELPERS ----------------
 def get_maintenance_mode():
     conn = sqlite3.connect("aqi.db")
@@ -297,19 +302,24 @@ def get_maintenance_mode():
     try:
         c.execute("SELECT value FROM settings WHERE key='maintenance_mode'")
         row = c.fetchone()
-        return row[0] == 'true' if row else False
+        return row[0] == "true" if row else False
     except:
         return False
     finally:
         conn.close()
 
+
 def set_maintenance_mode(status):
     conn = sqlite3.connect("aqi.db")
     c = conn.cursor()
-    val = 'true' if status else 'false'
-    c.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('maintenance_mode', ?)", (val,))
+    val = "true" if status else "false"
+    c.execute(
+        "INSERT OR REPLACE INTO settings (key, value) VALUES ('maintenance_mode', ?)",
+        (val,),
+    )
     conn.commit()
     conn.close()
+
 
 def get_activity_log_for_feedback(feedback_id):
     try:
@@ -596,16 +606,20 @@ st.sidebar.title("🌍 AQI Dashboard Menu")
 # ---------------- MAINTENANCE CHECK ----------------
 is_maintenance = get_maintenance_mode()
 if is_maintenance:
-    if st.session_state.role == 'admin':
+    if st.session_state.role == "admin":
         st.sidebar.warning("🔧 Maintenance Mode is ON")
     else:
-        st.markdown("""
+        st.markdown(
+            """
             <div style='text-align: center; padding: 50px;'>
                 <h1>🚧 Under Maintenance</h1>
                 <p>The dashboard is currently undergoing scheduled maintenance. Please check back later.</p>
             </div>
-        """, unsafe_allow_html=True)
+        """,
+            unsafe_allow_html=True,
+        )
         st.stop()
+
 
 # Theme Toggle
 def on_theme_change():
@@ -841,9 +855,15 @@ if menu == "Dashboard":
 
     # Chart Config for Downloading Images
     plotly_config = {
-        'displayModeBar': True,
-        'displaylogo': False,
-        'toImageButtonOptions': {'format': 'png', 'filename': 'aqi_chart', 'height': 600, 'width': 800, 'scale': 2}
+        "displayModeBar": True,
+        "displaylogo": False,
+        "toImageButtonOptions": {
+            "format": "png",
+            "filename": "aqi_chart",
+            "height": 600,
+            "width": 800,
+            "scale": 2,
+        },
     }
 
     st.markdown(
@@ -931,54 +951,60 @@ if menu == "Dashboard":
 
     st.write("---")
     st.subheader("⏳ AQI Time-Lapse (Folium Animation)")
-    
+
     if not map_df.empty:
         # Prepare features for TimestampedGeoJson
         features = []
         for _, row in map_df.iterrows():
             # Determine color based on AQI
             color = "green"
-            if row["AQI"] > 300: color = "red"
-            elif row["AQI"] > 200: color = "purple"
-            elif row["AQI"] > 100: color = "orange"
-            elif row["AQI"] > 50: color = "yellow"
-            
+            if row["AQI"] > 300:
+                color = "red"
+            elif row["AQI"] > 200:
+                color = "purple"
+            elif row["AQI"] > 100:
+                color = "orange"
+            elif row["AQI"] > 50:
+                color = "yellow"
+
             feature = {
-                'type': 'Feature',
-                'geometry': {
-                    'type': 'Point',
-                    'coordinates': [row['Lon'], row['Lat']],
+                "type": "Feature",
+                "geometry": {
+                    "type": "Point",
+                    "coordinates": [row["Lon"], row["Lat"]],
                 },
-                'properties': {
-                    'time': row['Date'].strftime('%Y-%m-%d'),
-                    'style': {'color': color},
-                    'icon': 'circle',
-                    'iconstyle': {
-                        'fillColor': color,
-                        'fillOpacity': 0.8,
-                        'stroke': 'true',
-                        'radius': 10
+                "properties": {
+                    "time": row["Date"].strftime("%Y-%m-%d"),
+                    "style": {"color": color},
+                    "icon": "circle",
+                    "iconstyle": {
+                        "fillColor": color,
+                        "fillOpacity": 0.8,
+                        "stroke": "true",
+                        "radius": 10,
                     },
-                    'popup': f"{row['City']}: {row['AQI']}"
-                }
+                    "popup": f"{row['City']}: {row['AQI']}",
+                },
             }
             features.append(feature)
 
         # Create Map
-        m_anim = folium.Map(location=[20.5937, 78.9629], zoom_start=4, tiles="CartoDB dark_matter")
-        
+        m_anim = folium.Map(
+            location=[20.5937, 78.9629], zoom_start=4, tiles="CartoDB dark_matter"
+        )
+
         TimestampedGeoJson(
-            {'type': 'FeatureCollection', 'features': features},
-            period='P1D',
+            {"type": "FeatureCollection", "features": features},
+            period="P1D",
             add_last_point=True,
             auto_play=False,
             loop=False,
             max_speed=1,
             loop_button=True,
-            date_options='YYYY-MM-DD',
-            time_slider_drag_update=True
+            date_options="YYYY-MM-DD",
+            time_slider_drag_update=True,
         ).add_to(m_anim)
-        
+
         st_html(m_anim._repr_html_(), height=500)
 
     st.write("---")
@@ -1055,9 +1081,13 @@ if menu == "Dashboard":
     buffer_html = io.StringIO()
     fig_line.write_html(buffer_html)
     html_bytes = buffer_html.getvalue().encode()
-    
-    st.download_button(label="📥 Download Interactive Chart (HTML)", data=html_bytes, file_name="aqi_trend_chart.html", mime="text/html")
 
+    st.download_button(
+        label="📥 Download Interactive Chart (HTML)",
+        data=html_bytes,
+        file_name="aqi_trend_chart.html",
+        mime="text/html",
+    )
 
     colA, colB = st.columns(2)
 
@@ -1178,7 +1208,9 @@ if menu == "Dashboard":
                 title=f"Seasonal Decomposition of AQI in {city_for_decomposition}",
                 labels={"x": "Date", "y": "Trend"},
             )
-            st.plotly_chart(fig_seasonal, use_container_width=True, config=plotly_config)
+            st.plotly_chart(
+                fig_seasonal, use_container_width=True, config=plotly_config
+            )
         else:
             st.warning(
                 "No data available for the selected city to perform seasonal decomposition."
@@ -1516,67 +1548,67 @@ elif menu == "Health Advice":
             else:
                 st.write("- 🌳 It is a great day to be outside!")
 
-# ---------------- PREDICTION PAGE ----------------
+    # ---------------- PREDICTION PAGE ----------------
     elif menu == "Prediction":
 
         st.title("🤖 AQI Prediction (Machine Learning)")
 
-    train_df = df[["PM25", "PM10", "NO2", "SO2", "CO", "O3", "AQI"]].dropna()
+        train_df = df[["PM25", "PM10", "NO2", "SO2", "CO", "O3", "AQI"]].dropna()
 
-    X = train_df[["PM25", "PM10", "NO2", "SO2", "CO", "O3"]]
-    y = train_df["AQI"]
+        X = train_df[["PM25", "PM10", "NO2", "SO2", "CO", "O3"]]
+        y = train_df["AQI"]
 
-    from sklearn.model_selection import train_test_split
-    from sklearn.linear_model import LinearRegression
-    from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
-    import numpy as np
+        from sklearn.model_selection import train_test_split
+        from sklearn.linear_model import LinearRegression
+        from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
+        import numpy as np
 
-    # ✅ Split data
-    X_train, X_test, y_train, y_test = train_test_split(
-        X, y, test_size=0.2, random_state=42
-    )
+        # ✅ Split data
+        X_train, X_test, y_train, y_test = train_test_split(
+            X, y, test_size=0.2, random_state=42
+        )
 
-    # ✅ Train model FIRST
-    model = LinearRegression()
-    model.fit(X_train, y_train)
+        # ✅ Train model FIRST
+        model = LinearRegression()
+        model.fit(X_train, y_train)
 
-    # ✅ Then predict
-    y_pred = model.predict(X_test)
+        # ✅ Then predict
+        y_pred = model.predict(X_test)
 
-    # ✅ Evaluation metrics
-    mae = mean_absolute_error(y_test, y_pred)
-    mse = mean_squared_error(y_test, y_pred)
-    rmse = np.sqrt(mse)
-    r2 = r2_score(y_test, y_pred)
+        # ✅ Evaluation metrics
+        mae = mean_absolute_error(y_test, y_pred)
+        mse = mean_squared_error(y_test, y_pred)
+        rmse = np.sqrt(mse)
+        r2 = r2_score(y_test, y_pred)
 
-    # ---------------- SHOW PERFORMANCE ----------------
-    st.subheader("📊 Model Performance")
-    st.write(f"R² Score: {r2:.2f}")
-    st.write(f"MAE: {mae:.2f}")
-    st.write(f"RMSE: {rmse:.2f}")
+        # ---------------- SHOW PERFORMANCE ----------------
+        st.subheader("📊 Model Performance")
+        st.write(f"R² Score: {r2:.2f}")
+        st.write(f"MAE: {mae:.2f}")
+        st.write(f"RMSE: {rmse:.2f}")
 
-    # ---------------- INPUT SECTION ----------------
-    col1, col2, col3 = st.columns(3)
+        # ---------------- INPUT SECTION ----------------
+        col1, col2, col3 = st.columns(3)
 
-    with col1:
-        pm25 = st.number_input("PM2.5", value=50.0)
-        pm10 = st.number_input("PM10", value=80.0)
+        with col1:
+            pm25 = st.number_input("PM2.5", value=50.0)
+            pm10 = st.number_input("PM10", value=80.0)
 
-    with col2:
-        no2 = st.number_input("NO2", value=20.0)
-        so2 = st.number_input("SO2", value=10.0)
+        with col2:
+            no2 = st.number_input("NO2", value=20.0)
+            so2 = st.number_input("SO2", value=10.0)
 
-    with col3:
-        co = st.number_input("CO", value=1.0)
-        o3 = st.number_input("O3", value=30.0)
+        with col3:
+            co = st.number_input("CO", value=1.0)
+            o3 = st.number_input("O3", value=30.0)
 
-    # ---------------- PREDICTION ----------------
-    if st.button("🔮 Predict AQI"):
-        prediction = model.predict([[pm25, pm10, no2, so2, co, o3]])
-        pred_val = round(prediction[0], 2)
+        # ---------------- PREDICTION ----------------
+        if st.button("🔮 Predict AQI"):
+            prediction = model.predict([[pm25, pm10, no2, so2, co, o3]])
+            pred_val = round(prediction[0], 2)
 
-        st.success(f"✅ Predicted AQI = {pred_val}")
-        st.info(f"📌 AQI Category: {aqi_category(pred_val)}")
+            st.success(f"✅ Predicted AQI = {pred_val}")
+            st.info(f"📌 AQI Category: {aqi_category(pred_val)}")
 # ---------------- NEWS FEED PAGE ----------------
 elif menu == "News Feed":
     st.title("📰 Global Air Quality News")
@@ -1800,7 +1832,9 @@ elif menu == "User Management":
     m_mode = st.toggle("🔧 Maintenance Mode", value=get_maintenance_mode())
     if m_mode != get_maintenance_mode():
         set_maintenance_mode(m_mode)
-        log_user_activity(st.session_state.user, f"Toggled Maintenance Mode to {m_mode}")
+        log_user_activity(
+            st.session_state.user, f"Toggled Maintenance Mode to {m_mode}"
+        )
         st.rerun()
 
     st.write("---")
@@ -2154,17 +2188,13 @@ if st.session_state.chat_open:
     if final_msg:
         st.session_state.chat_history.append({"role": "user", "content": final_msg})
 
-        #   city_df = df[df["City"] == suggested_city].sort_values("Date")
-        # 
-        if not city_df.empty:
-        # Prepare Rich Context Data
-         context_data = "No specific city data available."
+        context_data = "No specific city data available."
         if suggested_city and suggested_city in df["City"].values:
             city_df = df[df["City"] == suggested_city].sort_values("Date")
             if not city_df.empty:
                 latest = city_df.iloc[-1]
                 avg_aqi = city_df["AQI"].mean()
-                
+
                 context_data = f"""
                 Target City: {suggested_city}
                 Latest Record Date: {latest['Date'].strftime('%Y-%m-%d')}
@@ -2176,20 +2206,19 @@ if st.session_state.chat_open:
                 - SO2: {latest['SO2']}
                 - CO: {latest['CO']}
                 - O3: {latest['O3']}
-                
+
                 Historical Average AQI: {round(avg_aqi, 2)}
                 """
 
         prompt = f"""
         You are an advanced Air Quality Health & Data Assistant.
-        
+
         [REAL-TIME DATA CONTEXT]
-  ox  
         {context_data}
-        
+
         [USER QUESTION]
         {final_msg}
-        
+
         [INSTRUCTIONS]
         1. Analyze the provided pollutant levels (PM2.5, PM10, etc.) to give specific advice.
         2. Provide a direct, helpful answer to the user's question.
@@ -2198,11 +2227,10 @@ if st.session_state.chat_open:
         """
 
         try:
-            
             response = client.chat.completions.create(
                 model="gpt-4o-mini",
                 messages=[{"role": "user", "content": prompt}],
-                temperature=0.6
+                temperature=0.6,
             )
 
             ai_reply = response.choices[0].message.content
