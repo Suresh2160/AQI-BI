@@ -23,6 +23,30 @@ from folium.plugins import HeatMap
 from folium.plugins import HeatMap, TimestampedGeoJson
 import extra_streamlit_components as stx
 
+import requests
+
+def fetch_aqi_news(api_key):
+
+    url = (
+        f"https://newsapi.org/v2/everything?"
+        f"q=air%20pollution%20OR%20air%20quality"
+        f"&language=en"
+        f"&sortBy=publishedAt"
+        f"&pageSize=20"
+        f"&apiKey={api_key}"
+    )
+
+    try:
+        response = requests.get(url, timeout=10)
+        data = response.json()
+
+        if data.get("status") != "ok":
+            return []
+
+        return data.get("articles", [])
+
+    except Exception as e:
+        return []
 # ---------------- PAGE CONFIG ----------------
 st.set_page_config(page_title="AQI Dashboard", page_icon="🌍", layout="wide")
 
@@ -125,21 +149,6 @@ def add_coordinates(df):
 
 
 # ---------------- NEWS API ----------------
-def fetch_aqi_news():
-    # Replace with your actual NewsAPI key or use st.secrets
-    # Get one for free at https://newsapi.org/
-    NEWS_API_KEY = "YOUR_NEWSAPI_KEY_HERE"
-
-    if NEWS_API_KEY == "YOUR_NEWSAPI_KEY_HERE":
-        return None
-
-    url = f"https://newsapi.org/v2/everything?q=air+quality+pollution&language=en&sortBy=publishedAt&apiKey={NEWS_API_KEY}"
-    try:
-        response = requests.get(url, timeout=5)
-        return response.json().get("articles", [])
-    except:
-        return []
-
 
 # ---------------- SCHEDULER & EMAIL ----------------
 def send_daily_report_email():
@@ -1628,6 +1637,7 @@ elif menu == "News Feed":
 
     # Fetch news with API key
     news_items = fetch_aqi_news(api_key)
+    
 
     if not news_items:
         st.info("No news articles found at the moment.")
