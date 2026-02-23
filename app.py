@@ -19,11 +19,8 @@ import threading
 import folium
 from streamlit.components.v1 import html as st_html
 from streamlit_mic_recorder import speech_to_text
-from folium.plugins import HeatMap
 from folium.plugins import HeatMap, TimestampedGeoJson
 import extra_streamlit_components as stx
-
-import requests
 
 def fetch_aqi_news(api_key):
 
@@ -76,14 +73,20 @@ if "theme" not in st.session_state:
 
 
 # ---------------- OPENAI CLIENT ----------------
-client = OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
+openai_api_key = st.secrets.get("OPENAI_API_KEY")
+client = OpenAI(api_key=openai_api_key) if openai_api_key else None
 
 if st.button("Test OpenAI"):
-    test = client.chat.completions.create(
-        model="gpt-4o-mini",
-        messages=[{"role": "user", "content": "Hello"}]
-    )
-    st.write(test.choices[0].message.content)
+    if not client:
+        st.warning("OpenAI API key missing. Add `OPENAI_API_KEY` to Streamlit secrets.")
+    else:
+        try:
+            test = client.chat.completions.create(
+                model="gpt-4o-mini", messages=[{"role": "user", "content": "Hello"}]
+            )
+            st.write(test.choices[0].message.content)
+        except Exception as e:
+            st.error(f"OpenAI request failed: {e}")
 # ---------------- LOCATION DETECTION ----------------
 def get_user_location():
     try:
@@ -98,6 +101,8 @@ def get_user_location():
 
 
 # ---------------- WEATHER API ----------------
+def get_weather_data(city):
+    try:
         url = f"https://wttr.in/{city}?format=j1"
         response = requests.get(url, timeout=5)
 
@@ -105,7 +110,7 @@ def get_user_location():
             return None
 
         data = response.json()
-        current = data["current_condition"][0]
+        current = data.get("current_condition", [{}])[0]
 
         return {
             "temp": current.get("temp_C"),
@@ -114,9 +119,11 @@ def get_user_location():
             "wind": current.get("windspeedKmph"),
             "wind_dir": current.get("winddirDegree"),
         }
-
     except Exception:
         return None
+
+    
+       
 # ---------------- CITY COORDINATES ----------------
 CITY_COORDINATES = {
     "Ahmedabad": [23.0225, 72.5714],
@@ -192,9 +199,18 @@ if "scheduler_active" not in st.session_state:
 # ---------------- MAP UTILS ----------------
 def get_wind_arrow_icon(angle, speed):
     # Create a rotated arrow div
+    try:
+        angle = int(angle) if angle is not None else 0
+    except Exception:
+        angle = 0
+    try:
+        speed_int = int(speed) if speed is not None else 0
+    except Exception:
+        speed_int = 0
+
     return folium.DivIcon(
         html=f"""
-        <div style="transform: rotate({angle}deg); font-size: 24px; color: {'#ff4b4b' if int(speed) > 20 else '#00c9ff'}; text-shadow: 0 0 5px black;">
+        <div style="transform: rotate({angle}deg); font-size: 24px; color: {'#ff4b4b' if speed_int > 20 else '#00c9ff'}; text-shadow: 0 0 5px black;">
             ➤
         </div>
     """
@@ -1289,7 +1305,7 @@ if menu == "Dashboard":
             )
 
     st.write("---")
-    st.subheader("� AQI Intensity Calendar")
+    st.subheader("📅 AQI Intensity Calendar")
 
     # Calendar View Logic
     cal_city_options = selected_cities if selected_cities else city_list
@@ -1562,163 +1578,128 @@ elif menu == "Health Advice":
                 st.write("- 👶 Children and elderly should take extra breaks.")
             else:
                 st.write("- 🌳 It is a great day to be outside!")
-
-    # ---------------- PREDICTION PAGE ----------------
-    elif menu == "Prediction":
 # ---------------- PREDICTION PAGE ----------------
 elif menu == "Prediction":
 
-        st.title("🤖 AQI Prediction (Machine Learning)")
     st.title("🤖 AQI Prediction (Machine Learning)")
 
-        train_df = df[["PM25", "PM10", "NO2", "SO2", "CO", "O3", "AQI"]].dropna()
+    # ---------------- PREPARE DATA ----------------
     train_df = df[["PM25", "PM10", "NO2", "SO2", "CO", "O3", "AQI"]].dropna()
 
-        X = train_df[["PM25", "PM10", "NO2", "SO2", "CO", "O3"]]
-        y = train_df["AQI"]
     X = train_df[["PM25", "PM10", "NO2", "SO2", "CO", "O3"]]
     y = train_df["AQI"]
 
-        from sklearn.model_selection import train_test_split
-        from sklearn.linear_model import LinearRegression
-        from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
-        import numpy as np
     from sklearn.model_selection import train_test_split
     from sklearn.linear_model import LinearRegression
     from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
     import numpy as np
 
-        # ✅ Split data
-        X_train, X_test, y_train, y_test = train_test_split(
-            X, y, test_size=0.2, random_state=42
-        )
-    # ✅ Split data
+    # ---------------- SPLIT DATA ----------------
     X_train, X_test, y_train, y_test = train_test_split(
         X, y, test_size=0.2, random_state=42
     )
 
-        # ✅ Train model FIRST
-        model = LinearRegression()
-        model.fit(X_train, y_train)
-    # ✅ Train model FIRST
+    # ---------------- TRAIN MODEL ----------------
     model = LinearRegression()
     model.fit(X_train, y_train)
 
-        # ✅ Then predict
-        y_pred = model.predict(X_test)
-    # ✅ Then predict
+    # ---------------- PREDICT TEST ----------------
     y_pred = model.predict(X_test)
 
-        # ✅ Evaluation metrics
-        mae = mean_absolute_error(y_test, y_pred)
-        mse = mean_squared_error(y_test, y_pred)
-        rmse = np.sqrt(mse)
-        r2 = r2_score(y_test, y_pred)
-    # ✅ Evaluation metrics
+    # ---------------- EVALUATION ----------------
     mae = mean_absolute_error(y_test, y_pred)
     mse = mean_squared_error(y_test, y_pred)
     rmse = np.sqrt(mse)
     r2 = r2_score(y_test, y_pred)
 
-        # ---------------- SHOW PERFORMANCE ----------------
-        st.subheader("📊 Model Performance")
-        st.write(f"R² Score: {r2:.2f}")
-        st.write(f"MAE: {mae:.2f}")
-        st.write(f"RMSE: {rmse:.2f}")
     # ---------------- SHOW PERFORMANCE ----------------
     st.subheader("📊 Model Performance")
     st.write(f"R² Score: {r2:.2f}")
     st.write(f"MAE: {mae:.2f}")
     st.write(f"RMSE: {rmse:.2f}")
 
-        # ---------------- INPUT SECTION ----------------
-        col1, col2, col3 = st.columns(3)
-    # ---------------- INPUT SECTION ----------------
+    st.write("---")
+
+    # ---------------- USER INPUT ----------------
     col1, col2, col3 = st.columns(3)
 
-        with col1:
-            pm25 = st.number_input("PM2.5", value=50.0)
-            pm10 = st.number_input("PM10", value=80.0)
     with col1:
         pm25 = st.number_input("PM2.5", value=50.0)
         pm10 = st.number_input("PM10", value=80.0)
 
-        with col2:
-            no2 = st.number_input("NO2", value=20.0)
-            so2 = st.number_input("SO2", value=10.0)
     with col2:
         no2 = st.number_input("NO2", value=20.0)
         so2 = st.number_input("SO2", value=10.0)
 
-        with col3:
-            co = st.number_input("CO", value=1.0)
-            o3 = st.number_input("O3", value=30.0)
     with col3:
         co = st.number_input("CO", value=1.0)
         o3 = st.number_input("O3", value=30.0)
 
-        # ---------------- PREDICTION ----------------
-        if st.button("🔮 Predict AQI"):
-            prediction = model.predict([[pm25, pm10, no2, so2, co, o3]])
-            pred_val = round(prediction[0], 2)
-    # ---------------- PREDICTION ----------------
+    # ---------------- PREDICTION BUTTON ----------------
     if st.button("🔮 Predict AQI"):
+
         prediction = model.predict([[pm25, pm10, no2, so2, co, o3]])
         pred_val = round(prediction[0], 2)
 
-            st.success(f"✅ Predicted AQI = {pred_val}")
-            st.info(f"📌 AQI Category: {aqi_category(pred_val)}")
         st.success(f"✅ Predicted AQI = {pred_val}")
-        st.info(f"📌 AQI Category: {aqi_category(pred_val)}")
+
+        # AQI Category Function
+        def aqi_category(aqi):
+            if aqi <= 50:
+                return "Good"
+            elif aqi <= 100:
+                return "Moderate"
+            elif aqi <= 200:
+                return "Unhealthy"
+            elif aqi <= 300:
+                return "Very Unhealthy"
+            else:
+                return "Hazardous"
+
+        st.info(f"📌 AQI Category: {aqi_category(pred_val)}")      
 # ---------------- NEWS FEED PAGE ----------------
 elif menu == "News Feed":
-
     st.title("📰 Global Air Quality News")
     st.write(
         "Latest updates on air pollution, environmental policies, and health advisories."
     )
 
-    # ✅ Safe way to get API key
     api_key = st.secrets.get("NEWS_API_KEY")
-
     if not api_key:
         st.warning("⚠️ News API Key is missing.")
         st.markdown("👉 Add your API key in Streamlit Secrets.")
         st.markdown("[Get a free API Key from NewsAPI.org](https://newsapi.org/)")
         st.stop()
 
-    # Fetch news with API key
     news_items = fetch_aqi_news(api_key)
-    
 
     if not news_items:
         st.info("No news articles found at the moment.")
     else:
         for article in news_items[:10]:
-
             with st.container():
                 col_img, col_text = st.columns([1, 3])
 
                 with col_img:
                     if article.get("urlToImage"):
-                        st.image(article["urlToImage"], width="stretch")
+                        st.image(article["urlToImage"], use_container_width=True)
                     else:
                         st.markdown("📷 *No Image*")
 
                 with col_text:
-                    st.subheader(f"[{article.get('title','No Title')}]({article.get('url','#')})")
+                    st.subheader(
+                        f"[{article.get('title','No Title')}]({article.get('url','#')})"
+                    )
                     st.caption(
                         f"Source: {article.get('source',{}).get('name','Unknown')} | "
                         f"Published: {article.get('publishedAt','')[:10]}"
                     )
                     st.write(article.get("description", "No description available."))
 
-                st.write("---")
+            st.write("---")
 # ---------------- REPORT DOWNLOAD PAGE ----------------
 elif menu == "Report Download":
-
     st.title("📄 Download AQI Report (PDF)")
-
     if st.button("Generate PDF Report"):
 
         pdf = FPDF()
@@ -1740,7 +1721,12 @@ elif menu == "Report Download":
         pdf.output("aqi_report.pdf")
 
         with open("aqi_report.pdf", "rb") as file:
-            st.download_button("📥 Download PDF", file, file_name="aqi_report.pdf")
+            st.download_button(
+                label="📥 Download PDF",
+                data=file.read(),
+                file_name="aqi_report.pdf",
+                mime="application/pdf",
+            )
 
 
 # ---------------- RAW DATA PAGE ----------------
@@ -1797,9 +1783,7 @@ elif menu == "Profile":
 
     conn = sqlite3.connect("aqi.db")
     c = conn.cursor()
-    c.execute(
-        "SELECT profile_pic FROM users WHERE username=?", (st.session_state.user,)
-    )
+    c.execute("SELECT profile_pic FROM users WHERE username=?", (st.session_state.user,))
     pic_data = c.fetchone()
     conn.close()
 
@@ -1809,30 +1793,26 @@ elif menu == "Profile":
     uploaded_pic = st.file_uploader(
         "Upload New Profile Picture", type=["jpg", "png", "jpeg"]
     )
-    if uploaded_pic:
-        if st.button("Save Profile Picture"):
-            pic_bytes = uploaded_pic.read()
-            conn = sqlite3.connect("aqi.db")
-            c = conn.cursor()
-            c.execute(
-                "UPDATE users SET profile_pic=? WHERE username=?",
-                (pic_bytes, st.session_state.user),
-            )
-            conn.commit()
-            conn.close()
-            log_user_activity(st.session_state.user, "Updated Profile Picture")
-            st.success("Profile picture updated successfully!")
-            st.rerun()
+    if uploaded_pic and st.button("Save Profile Picture"):
+        pic_bytes = uploaded_pic.read()
+        conn = sqlite3.connect("aqi.db")
+        c = conn.cursor()
+        c.execute(
+            "UPDATE users SET profile_pic=? WHERE username=?",
+            (pic_bytes, st.session_state.user),
+        )
+        conn.commit()
+        conn.close()
+        log_user_activity(st.session_state.user, "Updated Profile Picture")
+        st.success("Profile picture updated successfully!")
+        st.rerun()
 
     st.write("---")
     st.subheader("📧 Notification Settings")
 
-    # Fetch current subscription status
     conn = sqlite3.connect("aqi.db")
     c = conn.cursor()
-    c.execute(
-        "SELECT subscription FROM users WHERE username=?", (st.session_state.user,)
-    )
+    c.execute("SELECT subscription FROM users WHERE username=?", (st.session_state.user,))
     sub_status = c.fetchone()
     is_subscribed = bool(sub_status[0]) if sub_status else False
     conn.close()
@@ -1863,7 +1843,6 @@ elif menu == "Profile":
         if new_pw != confirm_pw:
             st.error("New passwords do not match!")
         else:
-            # Verify current password
             conn = sqlite3.connect("aqi.db")
             cursor = conn.cursor()
             cursor.execute(
@@ -2295,17 +2274,20 @@ if st.session_state.chat_open:
         4. Keep the response concise and professional.
         """
 
-        try:
-            response = client.chat.completions.create(
-                model="gpt-4o-mini",
-                messages=[{"role": "user", "content": prompt}],
-                temperature=0.6,
-            )
+        if not client:
+            ai_reply = "⚠️ OpenAI API key missing. Add `OPENAI_API_KEY` to Streamlit secrets."
+        else:
+            try:
+                response = client.chat.completions.create(
+                    model="gpt-4o-mini",
+                    messages=[{"role": "user", "content": prompt}],
+                    temperature=0.6,
+                )
 
-            ai_reply = response.choices[0].message.content
+                ai_reply = response.choices[0].message.content
 
-        except Exception as e:
-            ai_reply = f"⚠️ OpenAI Error: {e}"
+            except Exception as e:
+                ai_reply = f"⚠️ OpenAI Error: {e}"
 
         st.session_state.chat_history.append({"role": "assistant", "content": ai_reply})
         st.rerun()
