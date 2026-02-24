@@ -1165,14 +1165,17 @@ if menu == "Dashboard":
 
     with col_btn:
         st.markdown("<div style='height: 28px;'></div>", unsafe_allow_html=True)
-        if st.button(
+
+        def go_to_comparison():
+            st.session_state.nav_selection = "City Comparison"
+            st.session_state.comp_cities_multi = st.session_state.selected_cities
+
+        st.button(
             "⚔️ Compare Cities",
             use_container_width=True,
             help="Compare selected cities in detail",
-        ):
-            st.session_state.nav_selection = "City Comparison"
-            st.session_state.comp_cities_multi = selected_cities
-            st.rerun()
+            on_click=go_to_comparison,
+        )
     # ---------------------------------------------------
 
     st.write("### Selected Cities:", ", ".join(selected_cities))
