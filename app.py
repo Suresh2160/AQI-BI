@@ -49,11 +49,13 @@ def fetch_aqi_news(api_key):
         data = response.json()
 
         if data.get("status") != "ok":
+            st.error(f"News API Error: {data.get('message')}")
             return []
 
         return data.get("articles", [])
 
     except Exception as e:
+        st.error(f"Error fetching news: {e}")
         return []
 
 
