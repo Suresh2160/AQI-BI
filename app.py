@@ -1,8 +1,10 @@
 import streamlit as st
+from streamlit.errors import StreamlitSecretNotFoundError
 import pandas as pd
 import sqlite3
 import plotly.express as px
 from sklearn.linear_model import LinearRegression
+from sklearn.ensemble import IsolationForest
 from fpdf import FPDF
 import numpy as np
 import requests
@@ -21,6 +23,15 @@ from streamlit.components.v1 import html as st_html
 from streamlit_mic_recorder import speech_to_text
 from folium.plugins import HeatMap, TimestampedGeoJson
 import extra_streamlit_components as stx
+import html
+
+
+def get_secret(key, default=None):
+    try:
+        return st.secrets.get(key, default)
+    except StreamlitSecretNotFoundError:
+        return default
+
 
 def fetch_aqi_news(api_key):
 
@@ -44,8 +55,10 @@ def fetch_aqi_news(api_key):
 
     except Exception as e:
         return []
+
+
 # ---------------- PAGE CONFIG ----------------
-st.set_page_config(page_title="AQI Dashboard", page_icon="🌍", layout="wide")
+st.set_page_config(page_title="AQI Dashboard", page_icon=None, layout="wide")
 
 # ---------------- SESSION INIT ----------------
 if "logged_in" not in st.session_state:
@@ -71,9 +84,24 @@ if "theme" not in st.session_state:
     # If cookie exists, use it; otherwise default to Dark
     st.session_state.theme = cookie_theme if cookie_theme else "Light"
 
+# Load Layout Preference
+cookie_layout = cookie_manager.get(cookie="layout")
+if "layout_pref" not in st.session_state:
+    default_layout = [
+        "Overview",
+        "Maps",
+        "Trends & Charts",
+        "Pollutant Analysis",
+        "Deep Dive",
+        "Advanced Analytics",
+    ]
+    st.session_state.layout_pref = (
+        cookie_layout.split(",") if cookie_layout else default_layout
+    )
+
 
 # ---------------- OPENAI CLIENT ----------------
-openai_api_key = st.secrets.get("OPENAI_API_KEY")
+openai_api_key = get_secret("OPENAI_API_KEY")
 client = OpenAI(api_key=openai_api_key) if openai_api_key else None
 
 if st.button("Test OpenAI"):
@@ -87,6 +115,8 @@ if st.button("Test OpenAI"):
             st.write(test.choices[0].message.content)
         except Exception as e:
             st.error(f"OpenAI request failed: {e}")
+
+
 # ---------------- LOCATION DETECTION ----------------
 def get_user_location():
     try:
@@ -101,6 +131,7 @@ def get_user_location():
 
 
 # ---------------- WEATHER API ----------------
+@st.cache_data(ttl=1800)
 def get_weather_data(city):
     try:
         url = f"https://wttr.in/{city}?format=j1"
@@ -122,8 +153,7 @@ def get_weather_data(city):
     except Exception:
         return None
 
-    
-       
+
 # ---------------- CITY COORDINATES ----------------
 CITY_COORDINATES = {
     "Ahmedabad": [23.0225, 72.5714],
@@ -163,20 +193,27 @@ def add_coordinates(df):
 
 # ---------------- NEWS API ----------------
 
+
 # ---------------- SCHEDULER & EMAIL ----------------
 def send_daily_report_email():
-    # Fetch subscribed users (In a real app, fetch from DB where subscription=True)
-    # For demo, we send to the current logged in user if they opted in
-    if "daily_report_sub" in st.session_state and st.session_state.daily_report_sub:
-        user_email = st.session_state.user
-        if "@" in user_email:  # Basic validation
-            subject = f"📢 Daily AQI Report - {pd.Timestamp.now().strftime('%Y-%m-%d')}"
-            body = "Here is your daily air quality update.\n\nPlease check the dashboard for more details."
+    # Fetch subscribed users from DB (Fixed: st.session_state is not available in background threads)
+    try:
+        conn = sqlite3.connect("aqi.db")
+        cursor = conn.cursor()
+        cursor.execute("SELECT username FROM users WHERE subscription=1")
+        users = cursor.fetchall()
+        conn.close()
 
-            # Reusing the send logic (simplified)
-            # In production, use the send_reset_email logic with parameters
-            print(f"Simulating email to {user_email}: {subject}")
-            # send_reset_email(user_email) # Uncomment to actually send if SMTP is configured
+        for user in users:
+            user_email = user[0]
+            if "@" in user_email:
+                subject = (
+                    f"Daily AQI Report - {pd.Timestamp.now().strftime('%Y-%m-%d')}"
+                )
+                print(f"Simulating email to {user_email}: {subject}")
+                # send_reset_email(user_email) # Uncomment to actually send if SMTP is configured
+    except Exception as e:
+        print(f"Scheduler Error: {e}")
 
 
 def run_scheduler():
@@ -295,6 +332,12 @@ def init_user_db():
     except sqlite3.OperationalError:
         cursor.execute("ALTER TABLE users ADD COLUMN subscription INTEGER DEFAULT 0")
 
+    # Migration: Add favorite_cities column to users
+    try:
+        cursor.execute("SELECT favorite_cities FROM users LIMIT 1")
+    except sqlite3.OperationalError:
+        cursor.execute("ALTER TABLE users ADD COLUMN favorite_cities TEXT")
+
     # Create Settings Table (For Maintenance Mode)
     cursor.execute(
         """
@@ -394,15 +437,20 @@ def login_user(username, password):
     conn = sqlite3.connect("aqi.db")
     cursor = conn.cursor()
 
-    cursor.execute("SELECT password, role FROM users WHERE username=?", (username,))
+    cursor.execute(
+        "SELECT password, role, favorite_cities FROM users WHERE username=?",
+        (username,),
+    )
     row = cursor.fetchone()
     conn.close()
 
     if row:
         stored_hash = row[0].encode()
         if bcrypt.checkpw(password.encode(), stored_hash):
-            return True, row[1]  # Return Success, Role
-    return False, None
+            # Parse favorites
+            favs = row[2].split(",") if row[2] else []
+            return True, row[1], favs  # Return Success, Role, Favorites
+    return False, None, []
 
 
 def login_google_user(token):
@@ -416,7 +464,10 @@ def login_google_user(token):
 
         conn = sqlite3.connect("aqi.db")
         cursor = conn.cursor()
-        cursor.execute("SELECT username, role FROM users WHERE username=?", (email,))
+        cursor.execute(
+            "SELECT username, role, favorite_cities FROM users WHERE username=?",
+            (email,),
+        )
         row = cursor.fetchone()
 
         if not row:
@@ -427,12 +478,14 @@ def login_google_user(token):
             )
             conn.commit()
             role = "user"
+            favs = []
         else:
             role = row[1]
+            favs = row[2].split(",") if row[2] else []
         conn.close()
-        return email, role
+        return email, role, favs
     except ValueError:
-        return None, None
+        return None, None, []
 
 
 def send_reset_email(to_email):
@@ -502,19 +555,103 @@ def aqi_category(aqi):
 df["AQI_Category"] = df["AQI"].apply(aqi_category)
 
 
+# ---------------- SIDEBAR FILTERS FUNCTION ----------------
+def render_sidebar_filters(df):
+    st.sidebar.markdown("### Filters")
+
+    city_list = sorted(df["City"].dropna().unique())
+
+    # 📍 Manual location selection
+    st.sidebar.markdown("#### Select Location")
+    manual_city = st.sidebar.selectbox("Choose your City", city_list, key="manual_city")
+
+    suggested_city = manual_city
+    location_text = manual_city
+
+    # Multi-city selection
+    # Initialize selected_cities with favorites if available and not already set
+    if (
+        "selected_cities" not in st.session_state
+        and "favorite_cities" in st.session_state
+    ):
+        valid_favs = [c for c in st.session_state.favorite_cities if c in city_list]
+        if valid_favs:
+            st.session_state.selected_cities = valid_favs
+
+    selected_cities = st.sidebar.multiselect(
+        "Select Cities", city_list, default=city_list[:3], key="selected_cities"
+    )
+
+    if st.sidebar.button("⭐ Save as Favorites"):
+        if st.session_state.get("logged_in"):
+            conn = sqlite3.connect("aqi.db")
+            c = conn.cursor()
+            fav_str = ",".join(selected_cities)
+            c.execute(
+                "UPDATE users SET favorite_cities=? WHERE username=?",
+                (fav_str, st.session_state.user),
+            )
+            conn.commit()
+            conn.close()
+            st.session_state.favorite_cities = selected_cities
+            st.toast("Favorites saved successfully!")
+        else:
+            st.error("Please login to save favorites.")
+
+    # Date filter
+    min_date = df["Date"].min()
+    max_date = df["Date"].max()
+
+    date_range = st.sidebar.date_input(
+        "Select Date Range", [min_date, max_date], key="date_range"
+    )
+
+    # Alert Threshold
+    st.sidebar.markdown("### Alerts")
+    alert_threshold = st.sidebar.slider("AQI Alert Threshold", 50, 500, 200, 10)
+
+    # Apply filters
+    filtered_df = df[df["City"].isin(selected_cities)]
+
+    if len(date_range) == 2:
+        start_date, end_date = date_range
+        filtered_df = filtered_df[
+            (filtered_df["Date"] >= pd.to_datetime(start_date))
+            & (filtered_df["Date"] <= pd.to_datetime(end_date))
+        ]
+
+    # Check for Alerts
+    if not filtered_df.empty:
+        max_aqi_view = filtered_df["AQI"].max()
+        if max_aqi_view > alert_threshold:
+            st.toast(f"High AQI Alert: {max_aqi_view} detected!")
+            st.sidebar.error(f"Alert: AQI > {alert_threshold} detected!")
+
+    return (
+        filtered_df,
+        selected_cities,
+        date_range,
+        alert_threshold,
+        city_list,
+        suggested_city,
+        location_text,
+    )
+
+
 # ---------------- AUTH UI ----------------
 if st.session_state.logged_in == False:
 
     # Check for Google Login Token in URL (passed from login.html)
     if "token" in st.query_params:
         token = st.query_params["token"]
-        email, role = login_google_user(token)
+        email, role, favs = login_google_user(token)
         if email:
             st.session_state.logged_in = True
             st.session_state.user = email
             st.session_state.role = role
+            st.session_state.favorite_cities = favs
             log_user_activity(email, "Login via Google")
-            st.success(f"Login Successful with Google: {email} ✅")
+            st.success(f"Login Successful with Google: {email}")
             st.rerun()
 
     # Check for Password Reset Token
@@ -526,7 +663,7 @@ if st.session_state.logged_in == False:
             reset_email_user = token.split("_for_")[1]
 
             st.markdown(
-                f"<h3 style='text-align:center;'>🔐 Reset Password for {reset_email_user}</h3>",
+                f"<h3 style='text-align:center;'>Reset Password for {html.escape(reset_email_user)}</h3>",
                 unsafe_allow_html=True,
             )
 
@@ -548,29 +685,46 @@ if st.session_state.logged_in == False:
                         )
                         conn.commit()
                         conn.close()
-                        st.success("✅ Password updated successfully! Please login.")
+                        st.success("Password updated successfully! Please login.")
                         st.query_params.clear()
                     else:
-                        st.error("❌ Passwords do not match.")
+                        st.error("Passwords do not match.")
             st.stop()
         except IndexError:
-            st.error("❌ Invalid Password Reset Token.")
+            st.error("Invalid Password Reset Token.")
 
     col_spacer1, col_login, col_spacer2 = st.columns([1, 2, 1])
 
     with col_login:
         st.markdown(
-            """
+            f"""
+            <style>
+            @keyframes pulse-logo {{
+                0% {{ transform: scale(1); }}
+                50% {{ transform: scale(1.1); }}
+                100% {{ transform: scale(1); }}
+            }}
+            .logo-text {{
+                text-align: center; 
+                font-size: 3rem; 
+                margin-bottom: 10px;
+                animation: pulse-logo 2s infinite;
+                background: linear-gradient(90deg, #4facfe, #00f2fe);
+                -webkit-background-clip: text;
+                -webkit-text-fill-color: transparent;
+                font-weight: bold;
+            }}
+            </style>
             <div class='login-container'>
-                <h1 style='text-align:center; font-size: 3rem; margin-bottom: 10px;'>🌍</h1>
-                <h1 style='text-align:center; background: linear-gradient(90deg, #4facfe, #00f2fe); -webkit-background-clip: text; -webkit-text-fill-color: transparent;'>AQI Dashboard</h1>
+                <div class='logo-text'>AQI</div>
+                <h1 class='gradient-text' style='text-align:center;'>AQI Dashboard</h1>
                 <p style='text-align:center; color: #ccc; margin-bottom: 30px;'>Monitor Air Quality with Real-Time Insights</p>
             </div>
         """,
             unsafe_allow_html=True,
         )
 
-        tab1, tab2 = st.tabs(["🔑 Login", "📝 Signup"])
+        tab1, tab2 = st.tabs(["Login", "Signup"])
 
         with tab1:
             st.markdown("### Welcome Back!")
@@ -585,28 +739,30 @@ if st.session_state.logged_in == False:
             )
 
             st.markdown("<br>", unsafe_allow_html=True)
-            if st.button("🚀 Login", use_container_width=True):
-                success, role = login_user(username, password)
+            if st.button("Login", use_container_width=True):
+                success, role, favs = login_user(username, password)
                 if success:
                     st.session_state.logged_in = True
                     st.session_state.user = username
                     st.session_state.role = role
+                    st.session_state.favorite_cities = favs
+                    st.session_state.selected_cities = favs  # Auto-load favorites
                     log_user_activity(username, "Login via Password")
-                    st.success("Login Successful ✅")
+                    st.success("Login Successful")
                     st.rerun()
                 else:
-                    st.error("Invalid username or password ❌")
+                    st.error("Invalid username or password")
 
             with st.expander("Forgot Password?"):
                 st.write("Enter your email to receive a reset link.")
                 reset_email_input = st.text_input(
                     "Email Address", key="reset_email_input"
                 )
-                if st.button("📩 Send Reset Link"):
+                if st.button("Send Reset Link"):
                     if send_reset_email(reset_email_input):
-                        st.success(f"✅ Reset link sent to {reset_email_input}")
+                        st.success(f"Reset link sent to {reset_email_input}")
                     else:
-                        st.error("❌ Failed to send email.")
+                        st.error("Failed to send email.")
 
         with tab2:
             st.markdown("### Join Us Today")
@@ -621,24 +777,27 @@ if st.session_state.logged_in == False:
             )
 
             st.markdown("<br>", unsafe_allow_html=True)
-            if st.button("✨ Create Account", use_container_width=True):
+            if st.button("Create Account", use_container_width=True):
                 if signup_user(new_username, new_password):
                     log_user_activity(new_username, "New User Signup")
-                    st.success("Account Created Successfully ✅ Please Login Now")
+                    st.success("Account Created Successfully. Please Login Now")
                 else:
-                    st.error("Username already exists ❌")
+                    st.error("Username already exists")
 
     st.stop()
 
 
 # ---------------- SIDEBAR MENU ----------------
-st.sidebar.title("🌍 AQI Dashboard Menu")
+st.sidebar.markdown(
+    "<h1 class='gradient-text' style='font-size: 1.75rem;'>AQI Menu</h1>",
+    unsafe_allow_html=True,
+)
 
 # ---------------- MAINTENANCE CHECK ----------------
 is_maintenance = get_maintenance_mode()
 if is_maintenance:
     if st.session_state.role == "admin":
-        st.sidebar.warning("🔧 Maintenance Mode is ON")
+        st.sidebar.warning("Maintenance Mode is ON")
     else:
         st.markdown(
             """
@@ -654,16 +813,33 @@ if is_maintenance:
 
 # Theme Toggle
 def on_theme_change():
+    # Update session state based on toggle
+    new_theme = "Dark" if st.session_state.dark_mode_toggle else "Light"
+    st.session_state.theme = new_theme
     # Save the selected theme to a cookie that expires in 30 days
     cookie_manager.set(
         "theme",
-        st.session_state.theme,
+        new_theme,
         expires_at=pd.Timestamp.now() + pd.Timedelta(days=30),
     )
 
 
-st.sidebar.selectbox(
-    "🎨 Theme", ["Light", "Dark"], key="theme", on_change=on_theme_change
+def on_layout_change():
+    # Save layout to cookie
+    layout_str = ",".join(st.session_state.layout_select)
+    st.session_state.layout_pref = st.session_state.layout_select
+    cookie_manager.set(
+        "layout",
+        layout_str,
+        expires_at=pd.Timestamp.now() + pd.Timedelta(days=30),
+    )
+
+
+st.sidebar.toggle(
+    "🌙 Dark Mode",
+    value=(st.session_state.theme == "Dark"),
+    key="dark_mode_toggle",
+    on_change=on_theme_change,
 )
 
 # Dark Mode CSS & Chart Template
@@ -677,6 +853,7 @@ if st.session_state.theme == "Dark":
         font-family: 'Poppins', sans-serif;
     }
 
+    /* --- ANIMATIONS --- */
     @keyframes gradientBG {
         0% { background-position: 0% 50%; }
         50% { background-position: 100% 50%; }
@@ -687,115 +864,182 @@ if st.session_state.theme == "Dark":
         0% { opacity: 0; transform: translateY(-20px); }
         100% { opacity: 1; transform: translateY(0); }
     }
+    
+    @keyframes glow {
+        from { box-shadow: 0 0 5px #00c9ff, 0 0 10px #00c9ff; }
+        to { box-shadow: 0 0 20px #00c9ff, 0 0 30px #00c9ff; }
+    }
 
-    /* Main container */
+    @keyframes text-gradient-anim {
+        0% { background-position: 0% 50%; }
+        50% { background-position: 100% 50%; }
+        100% { background-position: 0% 50%; }
+    }
+
+    /* --- GENERAL STYLES --- */
     [data-testid="stAppViewContainer"] {
-        background: linear-gradient(-45deg, #0f2027, #203a43, #2c5364, #243b55);
+        background: linear-gradient(-45deg, #0b0f19, #122a3a, #0b0f19, #23455a);
         background-size: 400% 400%;
-        animation: gradientBG 15s ease infinite;
+        animation: gradientBG 20s ease infinite;
         color: #E0E0E0;
     }
 
-    /* Sidebar */
     [data-testid="stSidebar"] {
-        background: rgba(0, 0, 0, 0.2);
-        backdrop-filter: blur(20px);
-        border-right: 1px solid rgba(255, 255, 255, 0.1);
+        background: rgba(0, 0, 0, 0.3);
+        backdrop-filter: blur(15px);
+        border-right: 1px solid rgba(100, 200, 255, 0.2);
     }
 
-    /* Text Colors */
-    .stMarkdown, p, h1, h2, h3, h4, h5, h6, label, span, div {
-       color: #FFFFFF !important;
+    /* --- TEXT & HEADERS --- */
+    .stMarkdown, p, label, span, div {
+       color: #EAEAEA !important;
     }
 
-    /* Custom Metric Cards */
-    .metric-container {
-        background: rgba(255, 255, 255, 0.1);
-        border-radius: 15px;
-        padding: 20px;
-        box-shadow: 0 4px 15px rgba(0, 0, 0, 0.2);
-        backdrop-filter: blur(5px);
-        text-align: center;
-        transition: transform 0.3s ease, box-shadow 0.3s ease;
-        border: 1px solid rgba(255, 255, 255, 0.1);
-        animation: fadeIn 1s ease-out;
+    h1, h2, h3, h4, h5, h6 {
+        color: #FFFFFF !important;
     }
-    .metric-container:hover {
-        transform: translateY(-5px);
-        box-shadow: 0 8px 25px rgba(0, 0, 0, 0.3);
-        background: rgba(255, 255, 255, 0.15);
-    }
-    .metric-value {
-        font-size: 2.5rem;
+
+    .gradient-text {
+        background: linear-gradient(90deg, #1ddde8, #00c9ff, #92fe9d, #ff89b5);
+        background-size: 300% 300%;
+        -webkit-background-clip: text;
+        -webkit-text-fill-color: transparent;
+        animation: text-gradient-anim 8s ease infinite;
         font-weight: 700;
-        background: linear-gradient(90deg, #4facfe, #00f2fe);
+    }
+    
+    /* Apply to main dashboard title */
+    h1.gradient-text {
+        font-size: 2.5rem;
+    }
+    
+    /* Apply to subheaders */
+    h3.gradient-text {
+        border-left: 4px solid #00c9ff;
+        padding-left: 15px;
+        margin-bottom: 20px;
+        background: linear-gradient(90deg, #00c9ff, #92fe9d);
         -webkit-background-clip: text;
         -webkit-text-fill-color: transparent;
     }
+
+    /* --- WIDGETS --- */
+    .metric-container {
+        background: rgba(10, 20, 30, 0.5);
+        border-radius: 15px;
+        padding: 20px;
+        box-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.37);
+        backdrop-filter: blur(10px);
+        text-align: center;
+        transition: transform 0.3s ease, box-shadow 0.3s ease;
+        border: 1px solid rgba(0, 201, 255, 0.2);
+        animation: fadeIn 1s ease-out;
+        position: relative;
+        overflow: hidden;
+    }
+    .metric-container:hover {
+        transform: translateY(-10px) scale(1.02);
+        box-shadow: 0 0 25px rgba(0, 201, 255, 0.5), 0 0 50px rgba(0, 201, 255, 0.3);
+        border-color: rgba(0, 201, 255, 0.5);
+    }
+    .metric-value {
+        font-size: 2.8rem;
+        font-weight: 700;
+        background: linear-gradient(90deg, #ffffff, #92fe9d, #00c9ff);
+        background-size: 200% 200%;
+        -webkit-background-clip: text;
+        -webkit-text-fill-color: transparent;
+        animation: text-gradient-anim 5s ease infinite;
+    }
     .metric-label {
         font-size: 1rem;
-        color: #ddd !important;
+        color: #bbb !important;
         margin-top: 5px;
         font-weight: 500;
     }
-    .metric-icon {
-        font-size: 2rem;
-        margin-bottom: 10px;
-    }
 
-    /* Buttons */
+    /* --- BUTTONS --- */
     .stButton>button {
-        background: linear-gradient(90deg, #00C9FF 0%, #92FE9D 100%);
-        color: #000 !important;
+        background: linear-gradient(90deg, #FC466B 0%, #3F5EFB 100%);
+        color: #fff !important;
         border: none;
         border-radius: 25px;
         padding: 12px 24px;
         font-weight: 700;
         text-transform: uppercase;
         letter-spacing: 1px;
-        transition: all 0.3s ease;
-        box-shadow: 0 4px 15px rgba(0, 201, 255, 0.4);
+        transition: all 0.4s ease;
+        box-shadow: 0 4px 15px rgba(0, 0, 0, 0.4);
+        position: relative;
+        overflow: hidden;
     }
     .stButton>button:hover {
-        transform: scale(1.05);
-        box-shadow: 0 6px 20px rgba(0, 201, 255, 0.6);
-        color: #000 !important;
+        transform: translateY(-3px);
+        box-shadow: 0 10px 20px rgba(63, 94, 251, 0.4);
+        color: #fff !important;
+    }
+    .stButton>button::before {
+        content: '';
+        position: absolute;
+        top: 0;
+        left: -100%;
+        width: 100%;
+        height: 100%;
+        background: linear-gradient(120deg, transparent, rgba(255, 255, 255, 0.3), transparent);
+        transition: all 0.7s;
+    }
+    .stButton>button:hover::before {
+        left: 100%;
     }
 
-    /* Inputs */
+    /* --- INPUTS & TABS --- */
     .stTextInput > div > div > input {
-        background-color: rgba(255, 255, 255, 0.1);
+        background-color: rgba(0, 0, 0, 0.3);
         color: white;
-        border: 1px solid rgba(255, 255, 255, 0.2);
+        border: 1px solid rgba(0, 201, 255, 0.3);
         border-radius: 10px;
+        transition: all 0.3s ease;
+    }
+    .stTextInput > div > div > input:focus {
+        border-color: #00c9ff;
+        box-shadow: 0 0 15px rgba(0, 201, 255, 0.5);
     }
     
-    /* Tabs */
     .stTabs [data-baseweb="tab-list"] {
-        gap: 10px;
+        gap: 15px;
         background-color: transparent;
+        border-bottom: none;
     }
     .stTabs [data-baseweb="tab"] {
-        background-color: rgba(255,255,255,0.1);
+        background-color: rgba(0,0,0,0.2);
         border-radius: 10px;
         padding: 10px 20px;
-        color: white;
-        border: none;
+        color: #ccc;
+        border: 1px solid rgba(255,255,255,0.1);
+        transition: all 0.3s ease;
+    }
+    .stTabs [data-baseweb="tab"]:hover {
+        background-color: rgba(0,0,0,0.4);
+        color: #fff;
     }
     .stTabs [aria-selected="true"] {
         background: linear-gradient(90deg, #FC466B 0%, #3F5EFB 100%);
         color: white;
+        box-shadow: 0 5px 15px rgba(63, 94, 251, 0.3);
     }
 
-    /* Login Container */
+    /* --- LOGIN PAGE --- */
     .login-container {
-        background: rgba(255, 255, 255, 0.05);
+        background: rgba(0, 0, 0, 0.4);
         padding: 40px;
         border-radius: 20px;
-        backdrop-filter: blur(10px);
-        border: 1px solid rgba(255, 255, 255, 0.1);
-        box-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.37);
+        backdrop-filter: blur(15px);
+        border: 1px solid rgba(0, 201, 255, 0.2);
+        box-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.5);
         animation: fadeIn 1.5s ease-out;
+    }
+    .login-container h1 {
+        font-size: 2rem;
     }
 
     </style>
@@ -814,16 +1058,22 @@ menu_options = [
     "News Feed",
     "Report Download",
     "Raw Data",
+    "Upload Data",
     "Profile",
     "Feedback",
 ]
 if st.session_state.role == "admin":
     menu_options.append("User Management")
 
-menu = st.sidebar.radio("Navigation", menu_options)
+if "nav_selection" not in st.session_state:
+    st.session_state.nav_selection = menu_options[0]
+if st.session_state.nav_selection not in menu_options:
+    st.session_state.nav_selection = menu_options[0]
+
+menu = st.sidebar.radio("Navigation", menu_options, key="nav_selection")
 st.sidebar.success(f"Logged in as: {st.session_state.user}")
 
-if st.sidebar.button("🚪 Logout"):
+if st.sidebar.button("Logout"):
     log_user_activity(st.session_state.user, "Logout")
     st.session_state.logged_in = False
     st.session_state.chat_history = []
@@ -831,57 +1081,46 @@ if st.sidebar.button("🚪 Logout"):
     st.rerun()
 
 # ---------------- FILTERS ----------------
-st.sidebar.header("🔍 Filters")
+(
+    filtered_df,
+    selected_cities,
+    date_range,
+    alert_threshold,
+    city_list,
+    suggested_city,
+    location_text,
+) = render_sidebar_filters(df)
 
-city_list = sorted(df["City"].dropna().unique())
+# ---------------- LAYOUT CUSTOMIZATION ----------------
+st.sidebar.markdown("---")
+st.sidebar.markdown("#### 🎨 Dashboard Layout")
+available_sections = [
+    "Overview",
+    "Maps",
+    "Trends & Charts",
+    "Pollutant Analysis",
+    "Deep Dive",
+    "Advanced Analytics",
+]
+# Ensure session state layout only contains valid options
+valid_default = [x for x in st.session_state.layout_pref if x in available_sections]
+if not valid_default:
+    valid_default = available_sections
 
-# 📍 Manual location selection
-st.sidebar.subheader("📍 Select Location")
-manual_city = st.sidebar.selectbox("Choose your City", city_list, key="manual_city")
-
-suggested_city = manual_city
-location_text = manual_city
-
-# Multi-city selection
-selected_cities = st.sidebar.multiselect(
-    "Select Cities", city_list, default=city_list[:3], key="selected_cities"
+selected_layout = st.sidebar.multiselect(
+    "Customize & Reorder",
+    available_sections,
+    default=valid_default,
+    key="layout_select",
+    on_change=on_layout_change,
 )
-
-# Date filter
-min_date = df["Date"].min()
-max_date = df["Date"].max()
-
-date_range = st.sidebar.date_input(
-    "Select Date Range", [min_date, max_date], key="date_range"
-)
-
-# Alert Threshold
-st.sidebar.header("🔔 Alerts")
-alert_threshold = st.sidebar.slider("AQI Alert Threshold", 50, 500, 200, 10)
-
-# Apply filters
-filtered_df = df[df["City"].isin(selected_cities)]
-
-if len(date_range) == 2:
-    start_date, end_date = date_range
-    filtered_df = filtered_df[
-        (filtered_df["Date"] >= pd.to_datetime(start_date))
-        & (filtered_df["Date"] <= pd.to_datetime(end_date))
-    ]
-
-# Check for Alerts
-if not filtered_df.empty:
-    max_aqi_view = filtered_df["AQI"].max()
-    if max_aqi_view > alert_threshold:
-        st.toast(f"🚨 High AQI Alert: {max_aqi_view} detected!", icon="⚠️")
-        st.sidebar.error(f"⚠️ Alert: AQI > {alert_threshold} detected!")
 
 # ---------------- DASHBOARD PAGE ----------------
 if menu == "Dashboard":
 
     if not filtered_df.empty and filtered_df["AQI"].max() > alert_threshold:
         st.error(
-            f"🚨 **CRITICAL ALERT**: The AQI in the selected region has reached **{filtered_df['AQI'].max()}**, which exceeds your safety threshold of {alert_threshold}. Please take necessary precautions."
+            f"**CRITICAL ALERT**: The AQI in the selected region has reached **{filtered_df['AQI'].max()}**, which exceeds your safety threshold of {alert_threshold}. Please take necessary precautions."
         )
 
     # Chart Config for Downloading Images
@@ -899,13 +1138,42 @@ if menu == "Dashboard":
 
     st.markdown(
         """
-        <h1 style='text-align: left; background: linear-gradient(90deg, #00C9FF, #92FE9D); -webkit-background-clip: text; -webkit-text-fill-color: transparent; animation: fadeIn 1s;'>
-            📊 Advanced Air Quality Dashboard
+        <h1 class='gradient-text' style='text-align: left; animation: fadeIn 1s;'>
+            Advanced Air Quality Dashboard
         </h1>
     """,
         unsafe_allow_html=True,
     )
-    st.write("### 📌 Selected Cities:", ", ".join(selected_cities))
+
+    # ---------------- GLOBAL SEARCH BAR ----------------
+    col_search, col_btn, col_spacer = st.columns([2, 1, 1])
+    with col_search:
+        # Filter out already selected cities to avoid duplicates
+        available_cities = [""] + [c for c in city_list if c not in selected_cities]
+        search_city = st.selectbox(
+            "🔍 Global Search: Find & Add City",
+            available_cities,
+            index=0,
+            key="global_city_search",
+            help="Select a city to instantly add it to your dashboard view.",
+        )
+        if search_city:
+            st.session_state.selected_cities.append(search_city)
+            st.rerun()
+
+    with col_btn:
+        st.markdown("<div style='height: 28px;'></div>", unsafe_allow_html=True)
+        if st.button(
+            "⚔️ Compare Cities",
+            use_container_width=True,
+            help="Compare selected cities in detail",
+        ):
+            st.session_state.nav_selection = "City Comparison"
+            st.session_state.comp_cities_multi = selected_cities
+            st.rerun()
+    # ---------------------------------------------------
+
+    st.write("### Selected Cities:", ", ".join(selected_cities))
 
     # Excel Export
     buffer = io.BytesIO()
@@ -913,452 +1181,620 @@ if menu == "Dashboard":
         filtered_df.to_excel(writer, index=False, sheet_name="AQI Data")
 
     st.download_button(
-        label="📥 Download Filtered Data (Excel)",
+        label="Download Filtered Data (Excel)",
         data=buffer,
         file_name="aqi_dashboard_data.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     )
 
-    # Weather Widget
-    if selected_cities:
-        weather = get_weather_data(selected_cities[0])
-        if weather:
-            st.info(
-                f"☁️ **Real-time Weather in {selected_cities[0]}:** {weather['desc']} | 🌡️ {weather['temp']}°C | 💧 {weather['humidity']}% Humidity | 💨 {weather['wind']} km/h Wind"
+    # ---------------- RENDER FUNCTIONS ----------------
+    def render_overview():
+        # Weather Widget
+        if selected_cities:
+            weather = get_weather_data(selected_cities[0])
+            if weather:
+                st.info(
+                    f"**Real-time Weather in {selected_cities[0]}:** {weather['desc']} | {weather['temp']}°C | {weather['humidity']}% Humidity | {weather['wind']} km/h Wind"
+                )
+
+        col1, col2, col3, col4 = st.columns(4)
+
+        def display_metric(col, label, value, icon, delta=None):
+            with col:
+                delta_html = ""
+                if delta is not None:
+                    color = (
+                        "#ff4b4b" if delta > 0 else "#00c9ff"
+                    )  # Red if increase (bad), Blue if decrease (good)
+                    arrow = "▲" if delta > 0 else "▼"
+                    delta_html = f"<div style='color: {color}; font-size: 0.9rem; margin-top: 5px; font-weight: bold;'>{arrow} {abs(delta):.2f} vs yesterday</div>"
+
+                st.markdown(
+                    f"""
+                <div class="metric-container">
+                    <div class="metric-icon">{icon}</div>
+                    <div class="metric-value">{value}</div>
+                    <div class="metric-label">{label}</div>
+                    {delta_html}
+                </div>
+                """,
+                    unsafe_allow_html=True,
+                )
+
+        # Calculate Day-over-Day Change for AQI
+        latest_date = filtered_df["Date"].max()
+        aqi_delta = None
+        current_aqi = round(filtered_df["AQI"].mean(), 2)
+
+        if pd.notna(latest_date):
+            prev_date = latest_date - pd.Timedelta(days=1)
+            # Get previous day data for the SAME selected cities from the full dataset
+            prev_df = df[(df["City"].isin(selected_cities)) & (df["Date"] == prev_date)]
+            if not prev_df.empty:
+                prev_aqi = prev_df["AQI"].mean()
+                aqi_delta = current_aqi - prev_aqi
+
+        display_metric(col1, "Total Records", len(filtered_df), "")
+        display_metric(col2, "Average AQI", current_aqi, "", delta=aqi_delta)
+        display_metric(col3, "Max AQI", round(filtered_df["AQI"].max(), 2), "")
+        display_metric(col4, "Average PM2.5", round(filtered_df["PM25"].mean(), 2), "")
+
+    def render_maps():
+        st.write("---")
+        st.markdown(
+            "<h3 class='gradient-text'>Geospatial AQI Evolution (Animated Map)</h3>",
+            unsafe_allow_html=True,
+        )
+
+        # Prepare data for animation
+        map_df = filtered_df.copy()
+        map_df = add_coordinates(map_df)
+        map_df = map_df.dropna(subset=["Lat", "Lon"])
+        # Ensure AQI is numeric and drop rows with missing coordinates or AQI
+        map_df["AQI"] = pd.to_numeric(map_df["AQI"], errors="coerce")
+        map_df = map_df.dropna(subset=["Lat", "Lon", "AQI"])
+
+        if not map_df.empty:
+            map_df["Date_Str"] = map_df["Date"].dt.strftime("%Y-%m-%d")
+            map_df = map_df.sort_values("Date")
+
+            fig_anim_map = px.scatter_mapbox(
+                map_df,
+                lat="Lat",
+                lon="Lon",
+                size="AQI",
+                color="AQI",
+                animation_frame="Date_Str",
+                hover_name="City",
+                color_continuous_scale="RdYlGn_r",
+                size_max=40,
+                zoom=3.5,
+                mapbox_style="carto-positron",
+                title="AQI Changes Over Time",
+            )
+            st.plotly_chart(fig_anim_map, use_container_width=True)
+        else:
+            st.warning("Not enough location data available for the map.")
+
+        st.write("---")
+        st.markdown(
+            "<h3 class='gradient-text'>AQI Time-Lapse (Folium Animation)</h3>",
+            unsafe_allow_html=True,
+        )
+
+        if not map_df.empty:
+            # Prepare features for TimestampedGeoJson
+            features = []
+            for _, row in map_df.iterrows():
+                # Determine color based on AQI
+                color = "green"
+                if row["AQI"] > 300:
+                    color = "red"
+                elif row["AQI"] > 200:
+                    color = "purple"
+                elif row["AQI"] > 100:
+                    color = "orange"
+                elif row["AQI"] > 50:
+                    color = "yellow"
+
+                feature = {
+                    "type": "Feature",
+                    "geometry": {
+                        "type": "Point",
+                        "coordinates": [row["Lon"], row["Lat"]],
+                    },
+                    "properties": {
+                        "time": row["Date"].strftime("%Y-%m-%d"),
+                        "style": {"color": color},
+                        "icon": "circle",
+                        "iconstyle": {
+                            "fillColor": color,
+                            "fillOpacity": 0.8,
+                            "stroke": "true",
+                            "radius": 10,
+                        },
+                        "popup": f"{row['City']}: {row['AQI']}",
+                    },
+                }
+                features.append(feature)
+
+            # Create Map
+            m_anim = folium.Map(
+                location=[20.5937, 78.9629], zoom_start=4, tiles="CartoDB dark_matter"
             )
 
-    col1, col2, col3, col4 = st.columns(4)
+            TimestampedGeoJson(
+                {"type": "FeatureCollection", "features": features},
+                period="P1D",
+                add_last_point=True,
+                auto_play=False,
+                loop=False,
+                max_speed=1,
+                loop_button=True,
+                date_options="YYYY-MM-DD",
+                time_slider_drag_update=True,
+            ).add_to(m_anim)
 
-    def display_metric(col, label, value, icon):
-        with col:
+            st_html(m_anim._repr_html_(), height=500)
+
+        st.write("---")
+        st.markdown(
+            "<h3 class='gradient-text'>Real-Time Wind Analysis (Speed & Direction)</h3>",
+            unsafe_allow_html=True,
+        )
+
+        if selected_cities:
+            # Create base map centered on the first selected city
+            first_city_coords = CITY_COORDINATES.get(
+                selected_cities[0], [20.5937, 78.9629]
+            )
+            wind_map = folium.Map(
+                location=first_city_coords, zoom_start=5, tiles="CartoDB dark_matter"
+            )
+
+            for city in selected_cities:
+                coords = CITY_COORDINATES.get(city)
+                if coords:
+                    w_data = get_weather_data(city)
+                    if w_data:
+                        # Add Wind Marker (Arrow)
+                        folium.Marker(
+                            location=coords,
+                            icon=get_wind_arrow_icon(
+                                w_data["wind_dir"], w_data["wind"]
+                            ),
+                            tooltip=f"<b>{city}</b><br>Wind: {w_data['wind']} km/h<br>Dir: {w_data['wind_dir']}°",
+                        ).add_to(wind_map)
+
+                        # Add Circle for context
+                        folium.CircleMarker(
+                            location=coords,
+                            radius=10,
+                            color="#333",
+                            fill=True,
+                            fill_opacity=0.4,
+                        ).add_to(wind_map)
+
+            st_html(wind_map._repr_html_(), height=500)
+
+        st.write("---")
+        st.markdown(
+            "<h3 class='gradient-text'>Pollution Density Heatmap</h3>",
+            unsafe_allow_html=True,
+        )
+
+        if not filtered_df.empty:
+            # Use the latest date in the filtered dataset for the snapshot
+            latest_date_in_view = filtered_df["Date"].max()
+            heatmap_df = filtered_df[filtered_df["Date"] == latest_date_in_view]
+
+            # Prepare data: [Lat, Lon, Weight (AQI)]
+            heat_data = []
+            for _, row in heatmap_df.iterrows():
+                coords = CITY_COORDINATES.get(row["City"])
+                if coords and pd.notnull(row["AQI"]):
+                    heat_data.append([coords[0], coords[1], row["AQI"]])
+
+            if heat_data:
+                # Center map on the first data point
+                start_loc = [heat_data[0][0], heat_data[0][1]]
+                m_heat = folium.Map(
+                    location=start_loc, zoom_start=5, tiles="CartoDB dark_matter"
+                )
+                HeatMap(
+                    heat_data,
+                    radius=25,
+                    blur=15,
+                    gradient={0.4: "blue", 0.65: "lime", 1: "red"},
+                ).add_to(m_heat)
+                st_html(m_heat._repr_html_(), height=500)
+            else:
+                st.info("Insufficient data for heatmap visualization.")
+
+    def render_trends():
+        st.write("---")
+        st.markdown(
+            "<h3 class='gradient-text'>AQI Trend (Multi City Comparison)</h3>",
+            unsafe_allow_html=True,
+        )
+        fig_line = px.line(filtered_df, x="Date", y="AQI", color="City", markers=True)
+        st.plotly_chart(fig_line, use_container_width=True, config=plotly_config)
+
+        # Feature: Download Chart as HTML
+        buffer_html = io.StringIO()
+        fig_line.write_html(buffer_html)
+        html_bytes = buffer_html.getvalue().encode()
+
+        st.download_button(
+            label="Download Interactive Chart (HTML)",
+            data=html_bytes,
+            file_name="aqi_trend_chart.html",
+            mime="text/html",
+        )
+
+        # Export Data CSV
+        st.download_button(
+            label="Download Trend Data (CSV)",
+            data=filtered_df.to_csv(index=False).encode("utf-8"),
+            file_name="aqi_trend_data.csv",
+            mime="text/csv",
+        )
+
+        colA, colB = st.columns(2)
+
+        with colA:
             st.markdown(
-                f"""
-            <div class="metric-container">
-                <div class="metric-icon">{icon}</div>
-                <div class="metric-value">{value}</div>
-                <div class="metric-label">{label}</div>
-            </div>
-            """,
+                "<h3 class='gradient-text'>AQI Category Distribution</h3>",
                 unsafe_allow_html=True,
             )
+            fig_pie = px.pie(filtered_df, names="AQI_Category")
+            st.plotly_chart(fig_pie, use_container_width=True, config=plotly_config)
 
-    display_metric(col1, "Total Records", len(filtered_df), "📂")
-    display_metric(col2, "Average AQI", round(filtered_df["AQI"].mean(), 2), "🌫")
-    display_metric(col3, "Max AQI", round(filtered_df["AQI"].max(), 2), "🔥")
-    display_metric(col4, "Average PM2.5", round(filtered_df["PM25"].mean(), 2), "🏭")
-
-    st.write("---")
-    st.subheader("🗺️ Geospatial AQI Evolution (Animated Map)")
-
-    # Prepare data for animation
-    map_df = filtered_df.copy()
-    map_df = add_coordinates(map_df)
-    map_df = map_df.dropna(subset=["Lat", "Lon"])
-    # Ensure AQI is numeric and drop rows with missing coordinates or AQI
-    map_df["AQI"] = pd.to_numeric(map_df["AQI"], errors="coerce")
-    map_df = map_df.dropna(subset=["Lat", "Lon", "AQI"])
-
-    if not map_df.empty:
-        map_df["Date_Str"] = map_df["Date"].dt.strftime("%Y-%m-%d")
-        map_df = map_df.sort_values("Date")
-
-        fig_anim_map = px.scatter_mapbox(
-            map_df,
-            lat="Lat",
-            lon="Lon",
-            size="AQI",
-            color="AQI",
-            animation_frame="Date_Str",
-            hover_name="City",
-            color_continuous_scale="RdYlGn_r",
-            size_max=40,
-            zoom=3.5,
-            mapbox_style="carto-positron",
-            title="AQI Changes Over Time",
-        )
-        st.plotly_chart(fig_anim_map, use_container_width=True)
-    else:
-        st.warning("Not enough location data available for the map.")
-
-    st.write("---")
-    st.subheader("⏳ AQI Time-Lapse (Folium Animation)")
-
-    if not map_df.empty:
-        # Prepare features for TimestampedGeoJson
-        features = []
-        for _, row in map_df.iterrows():
-            # Determine color based on AQI
-            color = "green"
-            if row["AQI"] > 300:
-                color = "red"
-            elif row["AQI"] > 200:
-                color = "purple"
-            elif row["AQI"] > 100:
-                color = "orange"
-            elif row["AQI"] > 50:
-                color = "yellow"
-
-            feature = {
-                "type": "Feature",
-                "geometry": {
-                    "type": "Point",
-                    "coordinates": [row["Lon"], row["Lat"]],
-                },
-                "properties": {
-                    "time": row["Date"].strftime("%Y-%m-%d"),
-                    "style": {"color": color},
-                    "icon": "circle",
-                    "iconstyle": {
-                        "fillColor": color,
-                        "fillOpacity": 0.8,
-                        "stroke": "true",
-                        "radius": 10,
-                    },
-                    "popup": f"{row['City']}: {row['AQI']}",
-                },
-            }
-            features.append(feature)
-
-        # Create Map
-        m_anim = folium.Map(
-            location=[20.5937, 78.9629], zoom_start=4, tiles="CartoDB dark_matter"
-        )
-
-        TimestampedGeoJson(
-            {"type": "FeatureCollection", "features": features},
-            period="P1D",
-            add_last_point=True,
-            auto_play=False,
-            loop=False,
-            max_speed=1,
-            loop_button=True,
-            date_options="YYYY-MM-DD",
-            time_slider_drag_update=True,
-        ).add_to(m_anim)
-
-        st_html(m_anim._repr_html_(), height=500)
-
-    st.write("---")
-    st.subheader("🌬️ Real-Time Wind Analysis (Speed & Direction)")
-
-    if selected_cities:
-        # Create base map centered on the first selected city
-        first_city_coords = CITY_COORDINATES.get(selected_cities[0], [20.5937, 78.9629])
-        wind_map = folium.Map(
-            location=first_city_coords, zoom_start=5, tiles="CartoDB dark_matter"
-        )
-
-        for city in selected_cities:
-            coords = CITY_COORDINATES.get(city)
-            if coords:
-                w_data = get_weather_data(city)
-                if w_data:
-                    # Add Wind Marker (Arrow)
-                    folium.Marker(
-                        location=coords,
-                        icon=get_wind_arrow_icon(w_data["wind_dir"], w_data["wind"]),
-                        tooltip=f"<b>{city}</b><br>Wind: {w_data['wind']} km/h<br>Dir: {w_data['wind_dir']}°",
-                    ).add_to(wind_map)
-
-                    # Add Circle for context
-                    folium.CircleMarker(
-                        location=coords,
-                        radius=10,
-                        color="#333",
-                        fill=True,
-                        fill_opacity=0.4,
-                    ).add_to(wind_map)
-
-        st_html(wind_map._repr_html_(), height=500)
-
-    st.write("---")
-    st.subheader("🔥 Pollution Density Heatmap")
-
-    if not filtered_df.empty:
-        # Use the latest date in the filtered dataset for the snapshot
-        latest_date_in_view = filtered_df["Date"].max()
-        heatmap_df = filtered_df[filtered_df["Date"] == latest_date_in_view]
-
-        # Prepare data: [Lat, Lon, Weight (AQI)]
-        heat_data = []
-        for _, row in heatmap_df.iterrows():
-            coords = CITY_COORDINATES.get(row["City"])
-            if coords and pd.notnull(row["AQI"]):
-                heat_data.append([coords[0], coords[1], row["AQI"]])
-
-        if heat_data:
-            # Center map on the first data point
-            start_loc = [heat_data[0][0], heat_data[0][1]]
-            m_heat = folium.Map(
-                location=start_loc, zoom_start=5, tiles="CartoDB dark_matter"
+        with colB:
+            st.markdown(
+                "<h3 class='gradient-text'>Average AQI by City</h3>",
+                unsafe_allow_html=True,
             )
-            HeatMap(
-                heat_data,
-                radius=25,
-                blur=15,
-                gradient={0.4: "blue", 0.65: "lime", 1: "red"},
-            ).add_to(m_heat)
-            st_html(m_heat._repr_html_(), height=500)
-        else:
-            st.info("Insufficient data for heatmap visualization.")
+            avg_city = filtered_df.groupby("City")["AQI"].mean().reset_index()
+            fig_bar = px.bar(avg_city, x="City", y="AQI", text_auto=True)
+            st.plotly_chart(fig_bar, use_container_width=True, config=plotly_config)
 
-    st.write("---")
-
-    st.subheader("📈 AQI Trend (Multi City Comparison)")
-    fig_line = px.line(filtered_df, x="Date", y="AQI", color="City", markers=True)
-    st.plotly_chart(fig_line, use_container_width=True, config=plotly_config)
-
-    # Feature: Download Chart as HTML
-    buffer_html = io.StringIO()
-    fig_line.write_html(buffer_html)
-    html_bytes = buffer_html.getvalue().encode()
-
-    st.download_button(
-        label="📥 Download Interactive Chart (HTML)",
-        data=html_bytes,
-        file_name="aqi_trend_chart.html",
-        mime="text/html",
-    )
-
-    colA, colB = st.columns(2)
-
-    with colA:
-        st.subheader("🟢 AQI Category Distribution")
-        fig_pie = px.pie(filtered_df, names="AQI_Category")
-        st.plotly_chart(fig_pie, use_container_width=True, config=plotly_config)
-
-    with colB:
-        st.subheader("🏙️ Average AQI by City")
-        avg_city = filtered_df.groupby("City")["AQI"].mean().reset_index()
-        fig_bar = px.bar(avg_city, x="City", y="AQI", text_auto=True)
-        st.plotly_chart(fig_bar, use_container_width=True, config=plotly_config)
-
-    st.write("---")
-
-    st.subheader("🔥 Pollutant Heatmap (City vs Pollutants)")
-    pollutants = ["PM25", "PM10", "NO2", "SO2", "CO", "O3"]
-    heatmap_data = filtered_df.groupby("City")[pollutants].mean()
-    fig_heat = px.imshow(heatmap_data, text_auto=True)
-    st.plotly_chart(fig_heat, use_container_width=True, config=plotly_config)
-
-    st.write("---")
-    st.subheader("🔗 Pollutant Correlation Matrix")
-
-    if not filtered_df.empty:
-        # Select numeric columns for correlation
-        corr_cols = ["PM25", "PM10", "NO2", "SO2", "CO", "O3", "AQI"]
-        # Filter only columns that exist in the dataframe
-        valid_cols = [c for c in corr_cols if c in filtered_df.columns]
-
-        if len(valid_cols) > 1:
-            corr_matrix = filtered_df[valid_cols].corr()
-            fig_corr = px.imshow(
-                corr_matrix,
-                text_auto=True,
-                color_continuous_scale="RdBu_r",
-                title="Correlation between Pollutants & AQI",
-                template=chart_template,
-            )
-            st.plotly_chart(fig_corr, use_container_width=True, config=plotly_config)
-
-    st.write("---")
-    st.subheader("📉 PM2.5 vs AQI Relationship")
-
-    if not filtered_df.empty:
-        fig_scatter = px.scatter(
-            filtered_df,
-            x="PM25",
-            y="AQI",
-            color="AQI_Category",
-            hover_data=["City", "Date"],
-            title="Impact of PM2.5 on AQI Levels",
-            template=chart_template,
+    def render_pollutant_analysis():
+        st.write("---")
+        st.markdown(
+            "<h3 class='gradient-text'>Pollutant Heatmap (City vs Pollutants)</h3>",
+            unsafe_allow_html=True,
         )
-        st.plotly_chart(fig_scatter, use_container_width=True, config=plotly_config)
+        pollutants = ["PM25", "PM10", "NO2", "SO2", "CO", "O3"]
+        heatmap_data = filtered_df.groupby("City")[pollutants].mean()
+        fig_heat = px.imshow(heatmap_data, text_auto=True)
+        st.plotly_chart(fig_heat, use_container_width=True, config=plotly_config)
 
-    st.write("---")
-    st.subheader("📦 AQI Distribution by City (Box Plot)")
-
-    if not filtered_df.empty:
-        fig_box = px.box(
-            filtered_df,
-            x="City",
-            y="AQI",
-            color="City",
-            title="AQI Distribution & Variability",
-            template=chart_template,
-        )
-        st.plotly_chart(fig_box, use_container_width=True, config=plotly_config)
-
-    st.write("---")
-    st.subheader("📊 AQI Frequency Histogram")
-
-    if not filtered_df.empty:
-        fig_hist = px.histogram(
-            filtered_df,
-            x="AQI",
-            color="City",
-            title="Distribution of AQI Values",
-            template=chart_template,
-        )
-        st.plotly_chart(fig_hist, use_container_width=True, config=plotly_config)
-
-    st.write("---")
-    st.subheader("Seasonal Decomposition of AQI")
-
-    if not filtered_df.empty:
-        city_for_decomposition = st.selectbox(
-            "Select City for Seasonal Decomposition",
-            filtered_df["City"].unique(),
-            key="decomposition_city",
-        )
-        decomposition_df = filtered_df[
-            filtered_df["City"] == city_for_decomposition
-        ].set_index("Date")
-
-        if not decomposition_df.empty:
-            # Ensure the DataFrame has a DatetimeIndex
-            if not isinstance(decomposition_df.index, pd.DatetimeIndex):
-                decomposition_df.index = pd.to_datetime(decomposition_df.index)
-
-            # Sort DataFrame by date
-            decomposition_df = decomposition_df.sort_index()
-
-            # Perform seasonal decomposition using moving averages
-            rolling_window = 30  # Adjust as needed
-            decomposition = (
-                decomposition_df["AQI"]
-                .rolling(window=rolling_window, center=True)
-                .mean()
-            )
-
-            # Create plot
-            fig_seasonal = px.line(
-                x=decomposition_df.index,
-                y=decomposition,
-                title=f"Seasonal Decomposition of AQI in {city_for_decomposition}",
-                labels={"x": "Date", "y": "Trend"},
-            )
-            st.plotly_chart(
-                fig_seasonal, use_container_width=True, config=plotly_config
-            )
-        else:
-            st.warning(
-                "No data available for the selected city to perform seasonal decomposition."
-            )
-    else:
-        st.warning("No data available. Please select cities and a date range.")
-
-    st.write("---")
-    st.subheader("🚨 Anomaly Detection (Spikes & Dips)")
-
-    if not filtered_df.empty:
-        # Select city for analysis
-        anomaly_city = st.selectbox(
-            "Select City for Anomaly Detection",
-            selected_cities if selected_cities else city_list,
-            key="anomaly_city",
+        # Export Heatmap Data
+        st.download_button(
+            label="Download Pollutant Analysis Data (CSV)",
+            data=heatmap_data.to_csv().encode("utf-8"),
+            file_name="pollutant_analysis.csv",
+            mime="text/csv",
         )
 
-        # Prepare data
-        anom_df = df[df["City"] == anomaly_city].sort_values("Date").copy()
-
-        # Calculate Rolling Stats (e.g., 7-day window)
-        window = 7
-        anom_df["Rolling_Mean"] = anom_df["AQI"].rolling(window=window).mean()
-        anom_df["Rolling_Std"] = anom_df["AQI"].rolling(window=window).std()
-
-        # Define Bounds
-        anom_df["Upper_Bound"] = anom_df["Rolling_Mean"] + (2 * anom_df["Rolling_Std"])
-        anom_df["Lower_Bound"] = anom_df["Rolling_Mean"] - (2 * anom_df["Rolling_Std"])
-
-        # Identify Anomalies
-        anom_df["Anomaly"] = (anom_df["AQI"] > anom_df["Upper_Bound"]) | (
-            anom_df["AQI"] < anom_df["Lower_Bound"]
-        )
-        anomalies = anom_df[anom_df["Anomaly"]]
-
-        # Plot
-        fig_anom = px.line(
-            anom_df,
-            x="Date",
-            y="AQI",
-            title=f"AQI Anomalies in {anomaly_city} (Rolling Mean ± 2σ)",
-            template=chart_template,
-        )
-        fig_anom.add_scatter(
-            x=anomalies["Date"],
-            y=anomalies["AQI"],
-            mode="markers",
-            name="Anomaly",
-            marker=dict(color="red", size=10, symbol="x"),
-        )
-        st.plotly_chart(fig_anom, use_container_width=True, config=plotly_config)
-
-        if not anomalies.empty:
-            st.warning(f"⚠️ Detected {len(anomalies)} anomalies in {anomaly_city}.")
-            with st.expander("View Anomaly Data"):
-                st.dataframe(anomalies[["Date", "AQI", "Rolling_Mean", "Rolling_Std"]])
-        else:
-            st.success(
-                f"✅ No significant anomalies detected in {anomaly_city} based on current trends."
-            )
-
-    st.write("---")
-    st.subheader("📅 AQI Intensity Calendar")
-
-    # Calendar View Logic
-    cal_city_options = selected_cities if selected_cities else city_list
-    if cal_city_options:
-        cal_city = st.selectbox(
-            "Select City for Calendar View", cal_city_options, key="cal_city_select"
+        st.write("---")
+        st.markdown(
+            "<h3 class='gradient-text'>Pollutant Correlation Matrix</h3>",
+            unsafe_allow_html=True,
         )
 
-        # Use full dataset 'df' to show full year history, ignoring dashboard date filter
-        cal_df = df[df["City"] == cal_city].copy()
+        if not filtered_df.empty:
+            # Select numeric columns for correlation
+            corr_cols = ["PM25", "PM10", "NO2", "SO2", "CO", "O3", "AQI"]
+            # Filter only columns that exist in the dataframe
+            valid_cols = [c for c in corr_cols if c in filtered_df.columns]
 
-        if not cal_df.empty:
-            cal_df["Year"] = cal_df["Date"].dt.year
-            cal_df["Week"] = cal_df["Date"].dt.isocalendar().week
-            cal_df["Weekday"] = cal_df["Date"].dt.day_name()
-
-            available_years = sorted(cal_df["Year"].unique())
-            if available_years:
-                selected_year = st.selectbox(
-                    "Select Year",
-                    available_years,
-                    index=len(available_years) - 1,
-                    key="cal_year_select",
-                )
-                cal_df_year = cal_df[cal_df["Year"] == selected_year]
-
-                weekday_order = [
-                    "Monday",
-                    "Tuesday",
-                    "Wednesday",
-                    "Thursday",
-                    "Friday",
-                    "Saturday",
-                    "Sunday",
-                ]
-                heatmap_data_cal = cal_df_year.pivot_table(
-                    index="Weekday", columns="Week", values="AQI", aggfunc="mean"
-                )
-                heatmap_data_cal = heatmap_data_cal.reindex(weekday_order)
-
-                fig_cal = px.imshow(
-                    heatmap_data_cal,
-                    labels=dict(x="Week of Year", y="Day of Week", color="AQI"),
-                    title=f"AQI Intensity Calendar - {cal_city} ({selected_year})",
-                    color_continuous_scale="RdYlGn_r",  # Green (Good) to Red (Bad)
+            if len(valid_cols) > 1:
+                corr_matrix = filtered_df[valid_cols].corr()
+                fig_corr = px.imshow(
+                    corr_matrix,
+                    text_auto=True,
+                    color_continuous_scale="RdBu_r",
+                    title="Correlation between Pollutants & AQI",
                     template=chart_template,
                 )
-                fig_cal.update_layout(height=400)
-                st.plotly_chart(fig_cal, use_container_width=True, config=plotly_config)
+                st.plotly_chart(
+                    fig_corr, use_container_width=True, config=plotly_config
+                )
+
+    def render_deep_dive():
+        st.write("---")
+        st.markdown(
+            "<h3 class='gradient-text'>PM2.5 vs AQI Relationship</h3>",
+            unsafe_allow_html=True,
+        )
+
+        if not filtered_df.empty:
+            fig_scatter = px.scatter(
+                filtered_df,
+                x="PM25",
+                y="AQI",
+                color="AQI_Category",
+                hover_data=["City", "Date"],
+                title="Impact of PM2.5 on AQI Levels",
+                template=chart_template,
+            )
+            st.plotly_chart(fig_scatter, use_container_width=True, config=plotly_config)
+
+        st.write("---")
+        st.markdown(
+            "<h3 class='gradient-text'>AQI Distribution by City (Box Plot)</h3>",
+            unsafe_allow_html=True,
+        )
+
+        if not filtered_df.empty:
+            fig_box = px.box(
+                filtered_df,
+                x="City",
+                y="AQI",
+                color="City",
+                title="AQI Distribution & Variability",
+                template=chart_template,
+            )
+            st.plotly_chart(fig_box, use_container_width=True, config=plotly_config)
+
+        st.write("---")
+        st.markdown(
+            "<h3 class='gradient-text'>AQI Frequency Histogram</h3>",
+            unsafe_allow_html=True,
+        )
+
+        if not filtered_df.empty:
+            fig_hist = px.histogram(
+                filtered_df,
+                x="AQI",
+                color="City",
+                title="Distribution of AQI Values",
+                template=chart_template,
+            )
+            st.plotly_chart(fig_hist, use_container_width=True, config=plotly_config)
+
+        # Export Deep Dive Data
+        if not filtered_df.empty:
+            st.download_button(
+                label="Download Deep Dive Data (CSV)",
+                data=filtered_df.to_csv(index=False).encode("utf-8"),
+                file_name="deep_dive_data.csv",
+                mime="text/csv",
+            )
+
+    def render_advanced_analytics():
+        st.write("---")
+        st.markdown(
+            "<h3 class='gradient-text'>Seasonal Decomposition of AQI</h3>",
+            unsafe_allow_html=True,
+        )
+
+        if not filtered_df.empty:
+            city_for_decomposition = st.selectbox(
+                "Select City for Seasonal Decomposition",
+                filtered_df["City"].unique(),
+                key="decomposition_city",
+            )
+            decomposition_df = filtered_df[
+                filtered_df["City"] == city_for_decomposition
+            ].set_index("Date")
+
+            if not decomposition_df.empty:
+                # Ensure the DataFrame has a DatetimeIndex
+                if not isinstance(decomposition_df.index, pd.DatetimeIndex):
+                    decomposition_df.index = pd.to_datetime(decomposition_df.index)
+
+                # Sort DataFrame by date
+                decomposition_df = decomposition_df.sort_index()
+
+                # Perform seasonal decomposition using moving averages
+                rolling_window = 30  # Adjust as needed
+                decomposition = (
+                    decomposition_df["AQI"]
+                    .rolling(window=rolling_window, center=True)
+                    .mean()
+                )
+
+                # Create plot
+                fig_seasonal = px.line(
+                    x=decomposition_df.index,
+                    y=decomposition,
+                    title=f"Seasonal Decomposition of AQI in {city_for_decomposition}",
+                    labels={"x": "Date", "y": "Trend"},
+                )
+                st.plotly_chart(
+                    fig_seasonal, use_container_width=True, config=plotly_config
+                )
+
+                # Export Seasonal Data
+                st.download_button(
+                    label="Download Seasonal Trend (CSV)",
+                    data=pd.DataFrame(
+                        {"Date": decomposition_df.index, "Trend": decomposition}
+                    )
+                    .to_csv(index=False)
+                    .encode("utf-8"),
+                    file_name=f"seasonal_trend_{city_for_decomposition}.csv",
+                    mime="text/csv",
+                )
+            else:
+                st.warning(
+                    "No data available for the selected city to perform seasonal decomposition."
+                )
+        else:
+            st.warning("No data available. Please select cities and a date range.")
+
+        st.write("---")
+        st.markdown(
+            "<h3 class='gradient-text'>Anomaly Detection (Spikes & Dips)</h3>",
+            unsafe_allow_html=True,
+        )
+
+        if not filtered_df.empty:
+            col_anom1, col_anom2 = st.columns(2)
+            with col_anom1:
+                # Select city for analysis
+                anomaly_city = st.selectbox(
+                    "Select City for Anomaly Detection",
+                    selected_cities if selected_cities else city_list,
+                    key="anomaly_city",
+                )
+            with col_anom2:
+                anomaly_method = st.selectbox(
+                    "Detection Method",
+                    [
+                        "Statistical (Rolling Mean)",
+                        "Machine Learning (Isolation Forest)",
+                    ],
+                    key="anomaly_method",
+                )
+
+            # Prepare data
+            anom_df = df[df["City"] == anomaly_city].sort_values("Date").copy()
+
+            if anomaly_method == "Statistical (Rolling Mean)":
+                # Calculate Rolling Stats (e.g., 7-day window)
+                window = 7
+                anom_df["Rolling_Mean"] = anom_df["AQI"].rolling(window=window).mean()
+                anom_df["Rolling_Std"] = anom_df["AQI"].rolling(window=window).std()
+
+                # Define Bounds
+                anom_df["Upper_Bound"] = anom_df["Rolling_Mean"] + (
+                    2 * anom_df["Rolling_Std"]
+                )
+                anom_df["Lower_Bound"] = anom_df["Rolling_Mean"] - (
+                    2 * anom_df["Rolling_Std"]
+                )
+
+                # Identify Anomalies
+                anom_df["Anomaly"] = (anom_df["AQI"] > anom_df["Upper_Bound"]) | (
+                    anom_df["AQI"] < anom_df["Lower_Bound"]
+                )
+                title_text = f"AQI Anomalies in {anomaly_city} (Rolling Mean ± 2σ)"
+            else:
+                # Machine Learning: Isolation Forest
+                # Fill NaNs for ML model
+                X_anom = anom_df[["AQI"]].fillna(anom_df["AQI"].mean())
+                iso_forest = IsolationForest(contamination=0.05, random_state=42)
+                anom_df["Anomaly_Score"] = iso_forest.fit_predict(X_anom)
+                anom_df["Anomaly"] = anom_df["Anomaly_Score"] == -1
+                title_text = f"AQI Anomalies in {anomaly_city} (Isolation Forest)"
+
+            anomalies = anom_df[anom_df["Anomaly"]]
+
+            # Plot
+            fig_anom = px.line(
+                anom_df,
+                x="Date",
+                y="AQI",
+                title=title_text,
+                template=chart_template,
+            )
+            fig_anom.add_scatter(
+                x=anomalies["Date"],
+                y=anomalies["AQI"],
+                mode="markers",
+                name="Anomaly",
+                marker=dict(color="red", size=10, symbol="x"),
+            )
+            st.plotly_chart(fig_anom, use_container_width=True, config=plotly_config)
+
+            if not anomalies.empty:
+                st.warning(f"Detected {len(anomalies)} anomalies in {anomaly_city}.")
+                with st.expander("View Anomaly Data"):
+                    cols_to_show = ["Date", "AQI"]
+                    if "Rolling_Mean" in anom_df.columns:
+                        cols_to_show.extend(["Rolling_Mean", "Rolling_Std"])
+                    st.dataframe(anomalies[cols_to_show])
+
+                # Export Anomalies
+                st.download_button(
+                    label="Download Detected Anomalies (CSV)",
+                    data=anomalies.to_csv(index=False).encode("utf-8"),
+                    file_name=f"anomalies_{anomaly_city}.csv",
+                    mime="text/csv",
+                )
+            else:
+                st.success(f"No significant anomalies detected in {anomaly_city}.")
+
+        st.write("---")
+        st.markdown(
+            "<h3 class='gradient-text'>AQI Intensity Calendar</h3>",
+            unsafe_allow_html=True,
+        )
+
+        # Calendar View Logic
+        cal_city_options = selected_cities if selected_cities else city_list
+        if cal_city_options:
+            cal_city = st.selectbox(
+                "Select City for Calendar View", cal_city_options, key="cal_city_select"
+            )
+
+            # Use full dataset 'df' to show full year history, ignoring dashboard date filter
+            cal_df = df[df["City"] == cal_city].copy()
+
+            if not cal_df.empty:
+                cal_df["Year"] = cal_df["Date"].dt.year
+                cal_df["Week"] = cal_df["Date"].dt.isocalendar().week
+                cal_df["Weekday"] = cal_df["Date"].dt.day_name()
+
+                available_years = sorted(cal_df["Year"].unique())
+                if available_years:
+                    selected_year = st.selectbox(
+                        "Select Year",
+                        available_years,
+                        index=len(available_years) - 1,
+                        key="cal_year_select",
+                    )
+                    cal_df_year = cal_df[cal_df["Year"] == selected_year]
+
+                    weekday_order = [
+                        "Monday",
+                        "Tuesday",
+                        "Wednesday",
+                        "Thursday",
+                        "Friday",
+                        "Saturday",
+                        "Sunday",
+                    ]
+                    heatmap_data_cal = cal_df_year.pivot_table(
+                        index="Weekday", columns="Week", values="AQI", aggfunc="mean"
+                    )
+                    heatmap_data_cal = heatmap_data_cal.reindex(weekday_order)
+
+                    fig_cal = px.imshow(
+                        heatmap_data_cal,
+                        labels=dict(x="Week of Year", y="Day of Week", color="AQI"),
+                        title=f"AQI Intensity Calendar - {cal_city} ({selected_year})",
+                        color_continuous_scale="RdYlGn_r",  # Green (Good) to Red (Bad)
+                        template=chart_template,
+                    )
+                    fig_cal.update_layout(height=400)
+                    st.plotly_chart(
+                        fig_cal, use_container_width=True, config=plotly_config
+                    )
+
+    # ---------------- EXECUTE LAYOUT ----------------
+    renderers = {
+        "Overview": render_overview,
+        "Maps": render_maps,
+        "Trends & Charts": render_trends,
+        "Pollutant Analysis": render_pollutant_analysis,
+        "Deep Dive": render_deep_dive,
+        "Advanced Analytics": render_advanced_analytics,
+    }
+
+    for section in selected_layout:
+        if section in renderers:
+            renderers[section]()
 
 # ---------------- CITY COMPARISON PAGE ----------------
 elif menu == "City Comparison":
-    st.title("⚔️ Multi-City Comparison")
+    st.markdown(
+        "<h1 class='gradient-text'>Multi-City Comparison</h1>", unsafe_allow_html=True
+    )
 
     # Allow selecting multiple cities
     comp_cities = st.multiselect(
@@ -1381,7 +1817,7 @@ elif menu == "City Comparison":
             ]
 
         # Metrics Summary
-        st.write("### 📊 Average AQI Summary")
+        st.markdown("### Average AQI Summary")
         avg_data = comp_df.groupby("City")["AQI"].mean().reset_index()
 
         # Display metrics in columns if few cities, else dataframe
@@ -1395,7 +1831,10 @@ elif menu == "City Comparison":
 
         st.write("---")
 
-        st.subheader("📈 AQI Trend Comparison")
+        st.markdown(
+            "<h3 class='gradient-text'>AQI Trend Comparison</h3>",
+            unsafe_allow_html=True,
+        )
         fig_comp = px.line(
             comp_df,
             x="Date",
@@ -1406,7 +1845,10 @@ elif menu == "City Comparison":
         )
         st.plotly_chart(fig_comp, use_container_width=True)
 
-        st.subheader("📊 Pollutant Comparison")
+        st.markdown(
+            "<h3 class='gradient-text'>Pollutant Comparison</h3>",
+            unsafe_allow_html=True,
+        )
         pollutants = ["PM25", "PM10", "NO2", "SO2", "CO", "O3"]
         p_data = comp_df.groupby("City")[pollutants].mean().reset_index()
         p_data = pd.melt(
@@ -1426,7 +1868,7 @@ elif menu == "City Comparison":
         # Download Comparison Data
         csv_comp = comp_df.to_csv(index=False).encode("utf-8")
         st.download_button(
-            label="📥 Download Comparison Data (CSV)",
+            label="Download Comparison Data (CSV)",
             data=csv_comp,
             file_name="city_comparison_data.csv",
             mime="text/csv",
@@ -1434,7 +1876,10 @@ elif menu == "City Comparison":
 
         # Map Visualization
         st.write("---")
-        st.subheader("🗺️ Geographical Comparison")
+        st.markdown(
+            "<h3 class='gradient-text'>Geographical Comparison</h3>",
+            unsafe_allow_html=True,
+        )
 
         map_data = []
         for idx, row in avg_data.iterrows():
@@ -1469,7 +1914,10 @@ elif menu == "City Comparison":
 
         # ---------------- GLOBAL AVERAGE COMPARISON ----------------
         st.write("---")
-        st.subheader("🌍 City vs Global Average")
+        st.markdown(
+            "<h3 class='gradient-text'>City vs Global Average</h3>",
+            unsafe_allow_html=True,
+        )
 
         # Calculate Global Average (Mean of all AQI records in DB)
         global_aqi_avg = df["AQI"].mean()
@@ -1515,7 +1963,10 @@ elif menu == "City Comparison":
 
 # ---------------- HEALTH ADVICE PAGE ----------------
 elif menu == "Health Advice":
-    st.title("❤️ Health Advice & Recommendations")
+    st.markdown(
+        "<h1 class='gradient-text'>Health Advice & Recommendations</h1>",
+        unsafe_allow_html=True,
+    )
 
     h_city = st.selectbox("Select City for Health Advice", city_list)
 
@@ -1537,27 +1988,27 @@ elif menu == "Health Advice":
 
             advice_dict = {
                 "Good": (
-                    "✅ **Enjoy your outdoor activities!**",
+                    "**Enjoy your outdoor activities!**",
                     "Air quality is considered satisfactory, and air pollution poses little or no risk.",
                 ),
                 "Satisfactory": (
-                    "⚠️ **Sensitive groups should take care.**",
+                    "**Sensitive groups should take care.**",
                     "Air quality is acceptable; however, for some pollutants there may be a moderate health concern for a very small number of people who are unusually sensitive to air pollution.",
                 ),
                 "Moderate": (
-                    "😷 **Limit prolonged outdoor exertion.**",
+                    "**Limit prolonged outdoor exertion.**",
                     "Active children and adults, and people with respiratory disease, such as asthma, should limit prolonged outdoor exertion.",
                 ),
                 "Poor": (
-                    "⛔ **Avoid long outdoor activities.**",
+                    "**Avoid long outdoor activities.**",
                     "Everyone may begin to experience health effects; members of sensitive groups may experience more serious health effects.",
                 ),
                 "Very Poor": (
-                    "🚨 **Health warnings of emergency conditions.**",
+                    "**Health warnings of emergency conditions.**",
                     "The entire population is more likely to be affected. Avoid all outdoor physical activities.",
                 ),
                 "Severe": (
-                    "☠️ **Health Alert: Serious effects.**",
+                    "**Health Alert: Serious effects.**",
                     "Everyone may experience more serious health effects. Remain indoors and keep activity levels low.",
                 ),
             }
@@ -1568,20 +2019,23 @@ elif menu == "Health Advice":
             st.info(advice[1])
 
             st.write("---")
-            st.write("#### 🛡️ General Precautions:")
+            st.write("#### General Precautions:")
             if latest_aqi > 200:
-                st.write("- 😷 Wear an N95 mask if you must go outside.")
-                st.write("- 🏠 Keep windows and doors closed.")
-                st.write("- 🌬️ Use an air purifier indoors if available.")
+                st.write("- Wear an N95 mask if you must go outside.")
+                st.write("- Keep windows and doors closed.")
+                st.write("- Use an air purifier indoors if available.")
             elif latest_aqi > 100:
-                st.write("- 🏃 Reduce intensity of outdoor exercise.")
-                st.write("- 👶 Children and elderly should take extra breaks.")
+                st.write("- Reduce intensity of outdoor exercise.")
+                st.write("- Children and elderly should take extra breaks.")
             else:
-                st.write("- 🌳 It is a great day to be outside!")
+                st.write("- It is a great day to be outside!")
 # ---------------- PREDICTION PAGE ----------------
 elif menu == "Prediction":
 
-    st.title("🤖 AQI Prediction (Machine Learning)")
+    st.markdown(
+        "<h1 class='gradient-text'>AQI Prediction (Machine Learning)</h1>",
+        unsafe_allow_html=True,
+    )
 
     # ---------------- PREPARE DATA ----------------
     train_df = df[["PM25", "PM10", "NO2", "SO2", "CO", "O3", "AQI"]].dropna()
@@ -1613,7 +2067,9 @@ elif menu == "Prediction":
     r2 = r2_score(y_test, y_pred)
 
     # ---------------- SHOW PERFORMANCE ----------------
-    st.subheader("📊 Model Performance")
+    st.markdown(
+        "<h3 class='gradient-text'>Model Performance</h3>", unsafe_allow_html=True
+    )
     st.write(f"R² Score: {r2:.2f}")
     st.write(f"MAE: {mae:.2f}")
     st.write(f"RMSE: {rmse:.2f}")
@@ -1636,12 +2092,12 @@ elif menu == "Prediction":
         o3 = st.number_input("O3", value=30.0)
 
     # ---------------- PREDICTION BUTTON ----------------
-    if st.button("🔮 Predict AQI"):
+    if st.button("Predict AQI"):
 
         prediction = model.predict([[pm25, pm10, no2, so2, co, o3]])
         pred_val = round(prediction[0], 2)
 
-        st.success(f"✅ Predicted AQI = {pred_val}")
+        st.success(f"Predicted AQI = {pred_val}")
 
         # AQI Category Function
         def aqi_category(aqi):
@@ -1656,18 +2112,20 @@ elif menu == "Prediction":
             else:
                 return "Hazardous"
 
-        st.info(f"📌 AQI Category: {aqi_category(pred_val)}")      
+        st.info(f"AQI Category: {aqi_category(pred_val)}")
 # ---------------- NEWS FEED PAGE ----------------
 elif menu == "News Feed":
-    st.title("📰 Global Air Quality News")
+    st.markdown(
+        "<h1 class='gradient-text'>Global Air Quality News</h1>", unsafe_allow_html=True
+    )
     st.write(
         "Latest updates on air pollution, environmental policies, and health advisories."
     )
 
-    api_key = st.secrets.get("NEWS_API_KEY")
+    api_key = get_secret("NEWS_API_KEY")
     if not api_key:
-        st.warning("⚠️ News API Key is missing.")
-        st.markdown("👉 Add your API key in Streamlit Secrets.")
+        st.warning("News API Key is missing.")
+        st.markdown("Add your API key in Streamlit Secrets.")
         st.markdown("[Get a free API Key from NewsAPI.org](https://newsapi.org/)")
         st.stop()
 
@@ -1684,7 +2142,7 @@ elif menu == "News Feed":
                     if article.get("urlToImage"):
                         st.image(article["urlToImage"], use_container_width=True)
                     else:
-                        st.markdown("📷 *No Image*")
+                        st.markdown("*No Image*")
 
                 with col_text:
                     st.subheader(
@@ -1699,7 +2157,10 @@ elif menu == "News Feed":
             st.write("---")
 # ---------------- REPORT DOWNLOAD PAGE ----------------
 elif menu == "Report Download":
-    st.title("📄 Download AQI Report (PDF)")
+    st.markdown(
+        "<h1 class='gradient-text'>Download AQI Report (PDF)</h1>",
+        unsafe_allow_html=True,
+    )
     if st.button("Generate PDF Report"):
 
         pdf = FPDF()
@@ -1722,7 +2183,7 @@ elif menu == "Report Download":
 
         with open("aqi_report.pdf", "rb") as file:
             st.download_button(
-                label="📥 Download PDF",
+                label="Download PDF",
                 data=file.read(),
                 file_name="aqi_report.pdf",
                 mime="application/pdf",
@@ -1731,13 +2192,77 @@ elif menu == "Report Download":
 
 # ---------------- RAW DATA PAGE ----------------
 elif menu == "Raw Data":
-    st.title("📋 Raw Data Viewer")
+    st.markdown(
+        "<h1 class='gradient-text'>Raw Data Viewer</h1>", unsafe_allow_html=True
+    )
     st.dataframe(filtered_df)
 
+# ---------------- UPLOAD DATA PAGE ----------------
+elif menu == "Upload Data":
+    st.markdown(
+        "<h1 class='gradient-text'>Upload & Analyze Your Data</h1>",
+        unsafe_allow_html=True,
+    )
+    st.write(
+        "Upload your own air quality data (CSV or Excel) to visualize trends and detect anomalies."
+    )
+
+    uploaded_file = st.file_uploader("Choose a file", type=["csv", "xlsx"])
+
+    if uploaded_file:
+        try:
+            if uploaded_file.name.endswith(".csv"):
+                user_df = pd.read_csv(uploaded_file)
+            else:
+                user_df = pd.read_excel(uploaded_file)
+
+            st.write("### Data Preview")
+            st.dataframe(user_df.head())
+
+            # Column Selection
+            cols = user_df.columns.tolist()
+            col_u1, col_u2 = st.columns(2)
+
+            with col_u1:
+                date_col = st.selectbox(
+                    "Select Date Column", cols, index=0 if "Date" in cols else 0
+                )
+            with col_u2:
+                val_col = st.selectbox(
+                    "Select Value Column (e.g., AQI)",
+                    cols,
+                    index=1 if len(cols) > 1 else 0,
+                )
+
+            if st.button("Analyze Uploaded Data"):
+                # Convert date
+                user_df[date_col] = pd.to_datetime(user_df[date_col], errors="coerce")
+                user_df = user_df.dropna(subset=[date_col, val_col])
+                user_df = user_df.sort_values(date_col)
+
+                # Plot Trend
+                st.markdown(
+                    f"<h3 class='gradient-text'>{val_col} Trend Analysis</h3>",
+                    unsafe_allow_html=True,
+                )
+                fig_user = px.line(
+                    user_df, x=date_col, y=val_col, title=f"{val_col} over Time"
+                )
+                st.plotly_chart(fig_user, use_container_width=True)
+
+                # Stats
+                st.write("### Statistics")
+                st.write(user_df[val_col].describe())
+
+        except Exception as e:
+            st.error(f"Error processing file: {e}")
 
 # ---------------- FEEDBACK PAGE ----------------
 elif menu == "Feedback":
-    st.title("📢 Report Air Quality Issues")
+    st.markdown(
+        "<h1 class='gradient-text'>Report Air Quality Issues</h1>",
+        unsafe_allow_html=True,
+    )
     st.write("Help us improve by reporting local air quality issues in your area.")
 
     with st.form("feedback_form"):
@@ -1770,20 +2295,24 @@ elif menu == "Feedback":
             conn.commit()
             conn.close()
             log_user_activity(st.session_state.user, f"Submitted feedback for {f_city}")
-            st.success("✅ Thank you! Your feedback has been recorded.")
+            st.success("Thank you! Your feedback has been recorded.")
 
 # ---------------- PROFILE PAGE ----------------
 elif menu == "Profile":
-    st.title("👤 My Profile")
+    st.markdown("<h1 class='gradient-text'>My Profile</h1>", unsafe_allow_html=True)
     st.write(f"**Username:** {st.session_state.user}")
     st.write(f"**Role:** {st.session_state.role}")
 
     st.write("---")
-    st.subheader("🖼️ Profile Picture")
+    st.markdown(
+        "<h3 class='gradient-text'>Profile Picture</h3>", unsafe_allow_html=True
+    )
 
     conn = sqlite3.connect("aqi.db")
     c = conn.cursor()
-    c.execute("SELECT profile_pic FROM users WHERE username=?", (st.session_state.user,))
+    c.execute(
+        "SELECT profile_pic FROM users WHERE username=?", (st.session_state.user,)
+    )
     pic_data = c.fetchone()
     conn.close()
 
@@ -1808,11 +2337,15 @@ elif menu == "Profile":
         st.rerun()
 
     st.write("---")
-    st.subheader("📧 Notification Settings")
+    st.markdown(
+        "<h3 class='gradient-text'>Notification Settings</h3>", unsafe_allow_html=True
+    )
 
     conn = sqlite3.connect("aqi.db")
     c = conn.cursor()
-    c.execute("SELECT subscription FROM users WHERE username=?", (st.session_state.user,))
+    c.execute(
+        "SELECT subscription FROM users WHERE username=?", (st.session_state.user,)
+    )
     sub_status = c.fetchone()
     is_subscribed = bool(sub_status[0]) if sub_status else False
     conn.close()
@@ -1833,7 +2366,9 @@ elif menu == "Profile":
         st.success("Subscription settings updated!")
 
     st.write("---")
-    st.subheader("🔐 Change Password")
+    st.markdown(
+        "<h3 class='gradient-text'>Change Password</h3>", unsafe_allow_html=True
+    )
 
     current_pw = st.text_input("Current Password", type="password")
     new_pw = st.text_input("New Password", type="password")
@@ -1865,7 +2400,10 @@ elif menu == "Profile":
 
 # ---------------- USER MANAGEMENT PAGE ----------------
 elif menu == "User Management":
-    st.title("👤 User Management (Admin Only)")
+    st.markdown(
+        "<h1 class='gradient-text'>User Management (Admin Only)</h1>",
+        unsafe_allow_html=True,
+    )
 
     conn = sqlite3.connect("aqi.db")
     # Fetching only ID and Username for security (hiding hashed passwords)
@@ -1876,8 +2414,10 @@ elif menu == "User Management":
     st.info(f"Total Registered Users: {len(users_df)}")
 
     st.write("---")
-    st.subheader("⚙️ System Settings")
-    m_mode = st.toggle("🔧 Maintenance Mode", value=get_maintenance_mode())
+    st.markdown(
+        "<h3 class='gradient-text'>System Settings</h3>", unsafe_allow_html=True
+    )
+    m_mode = st.toggle("Maintenance Mode", value=get_maintenance_mode())
     if m_mode != get_maintenance_mode():
         set_maintenance_mode(m_mode)
         log_user_activity(
@@ -1890,7 +2430,9 @@ elif menu == "User Management":
     col1, col2 = st.columns(2)
 
     with col1:
-        st.subheader("❌ Delete User")
+        st.markdown(
+            "<h3 class='gradient-text'>Delete User</h3>", unsafe_allow_html=True
+        )
         if not users_df.empty:
             user_to_delete = st.selectbox(
                 "Select User to Delete", users_df["username"].tolist()
@@ -1911,7 +2453,9 @@ elif menu == "User Management":
             st.warning("No users to delete.")
 
     st.write("---")
-    st.subheader("🔑 Update User Password")
+    st.markdown(
+        "<h3 class='gradient-text'>Update User Password</h3>", unsafe_allow_html=True
+    )
 
     u_update = st.selectbox(
         "Select User to Update", users_df["username"].tolist(), key="update_user_select"
@@ -1936,7 +2480,9 @@ elif menu == "User Management":
             st.warning("Please enter a new password.")
 
     st.write("---")
-    st.subheader("👮 Manage User Roles")
+    st.markdown(
+        "<h3 class='gradient-text'>Manage User Roles</h3>", unsafe_allow_html=True
+    )
 
     col_role1, col_role2 = st.columns(2)
     with col_role1:
@@ -1964,7 +2510,9 @@ elif menu == "User Management":
         st.rerun()
 
     with col2:
-        st.subheader("⚠️ Reset Database")
+        st.markdown(
+            "<h3 class='gradient-text'>Reset Database</h3>", unsafe_allow_html=True
+        )
         with st.expander("Danger Zone: Clear All Users"):
             st.warning("This action will permanently delete ALL registered users!")
             if st.button("DELETE ALL USERS", type="primary"):
@@ -1978,7 +2526,7 @@ elif menu == "User Management":
                 st.rerun()
 
     st.write("---")
-    st.subheader("📜 Activity Logs")
+    st.markdown("<h3 class='gradient-text'>Activity Logs</h3>", unsafe_allow_html=True)
     conn = sqlite3.connect("aqi.db")
     logs_df = pd.read_sql_query(
         "SELECT * FROM activity_logs ORDER BY timestamp DESC", conn
@@ -1988,34 +2536,22 @@ elif menu == "User Management":
     # Improved UI for Logs
     with st.container(height=400):
         for index, row in logs_df.iterrows():
-            icon = "🔹"
-            if "Login" in row["action"]:
-                icon = "🟢"
-            elif "Logout" in row["action"]:
-                icon = "🚪"
-            elif "Delete" in row["action"] or "RESET" in row["action"]:
-                icon = "🔴"
-            elif "Update" in row["action"] or "Change" in row["action"]:
-                icon = "✏️"
-            elif "Signup" in row["action"]:
-                icon = "✨"
-            elif "Resolved" in row["action"]:
-                icon = "✅"
-
             st.markdown(
-                f"**{icon} {row['timestamp']}** - `{row['username']}`: {row['action']}"
+                f"**{row['timestamp']}** - `{row['username']}`: {row['action']}"
             )
 
     csv = logs_df.to_csv(index=False).encode("utf-8")
     st.download_button(
-        label="📥 Download Logs as CSV",
+        label="Download Logs as CSV",
         data=csv,
         file_name="activity_logs.csv",
         mime="text/csv",
     )
 
     st.write("---")
-    st.subheader("📢 User Feedback Reports")
+    st.markdown(
+        "<h3 class='gradient-text'>User Feedback Reports</h3>", unsafe_allow_html=True
+    )
     conn = sqlite3.connect("aqi.db")
     feedback_df = pd.read_sql_query(
         "SELECT * FROM feedback ORDER BY timestamp DESC", conn
@@ -2060,7 +2596,7 @@ elif menu == "User Management":
         pending_feedback = feedback_df[feedback_df["status"] == "Pending"]
 
         if not pending_feedback.empty:
-            st.write("#### 🛠️ Resolve Feedback")
+            st.markdown("#### Resolve Feedback")
             f_ids_to_resolve = st.multiselect(
                 "Select Feedback IDs to Resolve", pending_feedback["id"].tolist()
             )
@@ -2083,7 +2619,7 @@ elif menu == "User Management":
                 else:
                     st.warning("Please select at least one feedback item.")
         elif not feedback_df.empty:
-            st.info("All feedback items are resolved! 🎉")
+            st.info("All feedback items are resolved!")
 
 # ==========================================================
 # ---------------- FLOATING CHATBOT (BOTTOM RIGHT) ----------
@@ -2156,7 +2692,7 @@ st.markdown(
 
 
 # Chat button toggle
-if st.button("💬 Chat Assistant", key="open_chat"):
+if st.button("Chat Assistant", key="open_chat"):
     st.session_state.chat_open = not st.session_state.chat_open
 
 
@@ -2166,8 +2702,8 @@ if st.session_state.chat_open:
     st.markdown(
         f"""
     <div class="chat-popup">
-        <div class="chat-title">🤖 AQI Assistant</div>
-        <div class="chat-location">📍 {location_text}</div>
+        <div class="chat-title">AQI Assistant</div>
+        <div class="chat-location">{location_text}</div>
     """,
         unsafe_allow_html=True,
     )
@@ -2175,10 +2711,11 @@ if st.session_state.chat_open:
     # Chat History
     chat_html = '<div class="chat-body">'
     for chat in st.session_state.chat_history:
+        safe_content = html.escape(chat["content"])
         if chat["role"] == "user":
-            chat_html += f'<div class="user-msg">{chat["content"]}</div>'
+            chat_html += f'<div class="user-msg">{safe_content}</div>'
         else:
-            chat_html += f'<div class="bot-msg">{chat["content"]}</div>'
+            chat_html += f'<div class="bot-msg">{safe_content}</div>'
     chat_html += "</div>"
 
     st.markdown(chat_html, unsafe_allow_html=True)
@@ -2186,19 +2723,19 @@ if st.session_state.chat_open:
     # Quick Buttons
     colq1, colq2, colq3 = st.columns(3)
 
-    if colq1.button("🌫 AQI Today"):
+    if colq1.button("AQI Today"):
         st.session_state.chat_history.append(
             {"role": "user", "content": "What is the AQI today and is it safe?"}
         )
         st.rerun()
 
-    if colq2.button("😷 Mask?"):
+    if colq2.button("Mask?"):
         st.session_state.chat_history.append(
             {"role": "user", "content": "Do I need to wear a mask today?"}
         )
         st.rerun()
 
-    if colq3.button("🏃 Exercise"):
+    if colq3.button("Exercise"):
         st.session_state.chat_history.append(
             {"role": "user", "content": "Is it safe to do outdoor exercise today?"}
         )
@@ -2219,8 +2756,8 @@ if st.session_state.chat_open:
         # Voice Input Button
         voice_text = speech_to_text(
             language="en",
-            start_prompt="🎤",
-            stop_prompt="🛑",
+            start_prompt="Speak",
+            stop_prompt="Stop",
             just_once=True,
             key="STT",
         )
@@ -2260,39 +2797,43 @@ if st.session_state.chat_open:
 
         prompt = f"""
         You are an advanced Air Quality Health & Data Assistant.
-
+        
         [REAL-TIME DATA CONTEXT]
         {context_data}
-
+        
         [USER QUESTION]
         {final_msg}
-
+        
         [INSTRUCTIONS]
-        1. Analyze the provided pollutant levels (PM2.5, PM10, etc.) to give specific advice.
+        1.  Analyze the provided pollutant levels (PM2.5, PM10, etc.) to give specific advice.
         2. Provide a direct, helpful answer to the user's question.
         3. If AQI is high (>100), strictly recommend health precautions (masks, air purifiers).
         4. Keep the response concise and professional.
         """
 
         if not client:
-            ai_reply = "⚠️ OpenAI API key missing. Add `OPENAI_API_KEY` to Streamlit secrets."
+            ai_reply = (
+                "OpenAI API key missing. Add `OPENAI_API_KEY` to Streamlit secrets."
+            )
         else:
             try:
                 response = client.chat.completions.create(
                     model="gpt-4o-mini",
                     messages=[{"role": "user", "content": prompt}],
                     temperature=0.6,
+                    max_tokens=200,  # Limit the response length for better control
                 )
 
                 ai_reply = response.choices[0].message.content
 
             except Exception as e:
-                ai_reply = f"⚠️ OpenAI Error: {e}"
+                ai_reply = f"OpenAI Error: {e}"
 
         st.session_state.chat_history.append({"role": "assistant", "content": ai_reply})
+
         st.rerun()
 
-    if st.button("❌ Close Chat", key="close_chat"):
+    if st.button("Close Chat", key="close_chat"):
         st.session_state.chat_open = False
         st.rerun()
 
